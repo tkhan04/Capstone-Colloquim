@@ -1,5 +1,4 @@
 <?php
-
 /*
 $dbHost = '';
 $dbPort = '';
@@ -7,6 +6,9 @@ $dbName = '';
 $dbUser = '';
 $dbPass = '';
 */
+
+// TESTING TAHMID GITHUB
+
 
 require __DIR__ . '/../secrets/db.php'; //ignore this line, it has the actual credentials, 
 // refer to the creds in the commented line at the top and enter your local credentials
