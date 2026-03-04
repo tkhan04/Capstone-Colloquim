@@ -1,14 +1,22 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Hello World</title> <!-- This is just found in the url -->
-</head>  
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login</title>
+    <link rel="stylesheet" href="style.css">
+</head>
 <body>
-    <h1>Hello Capstone!</h1> <!-- This is just the large text tile-->
-    <button onclick="callPHP()">Call PHP</button> <!-- This is just a button-->
-    <div id="result"></div> <!-- This is where the result will be displayed-->
-    <div id="database"></div> <!-- This is where the database will be displayed-->
-    <script src="app.js"></script> <!-- this refers to the js script file which refers to our php file-->
+    <div class="container">
+        <img src="gburglogo.jpg" alt="Gettysburg College Logo" class="logo" sizes="(max-width: 768px) 100vw, 300px">
+        <h1>User Login</h1>
+        <form id="loginForm" onsubmit="handleLogin(event)">
+            <input type="email" id="email" placeholder="Enter your email" required>
+            <button type="submit">Login</button>
+        </form>
+        <div id="loginResult"></div>
+    </div>
+    <script src="app.js"></script>
 </body>
 </html>
 
