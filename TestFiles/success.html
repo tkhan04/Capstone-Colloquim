@@ -8,10 +8,10 @@
     <p id="welcomeMessage"></p>
     <script>
         const urlParams = new URLSearchParams(window.location.search);
-        const profId = urlParams.get('prof_id');
+        const userId = urlParams.get('user_id');
         const welcomeDiv = document.getElementById('welcomeMessage');
-        if (profId) {
-            welcomeDiv.textContent = `Welcome, Professor ID: ${profId}`;
+        if (userId) {
+            welcomeDiv.textContent = `Welcome, User ID: ${userId}`;
         } else {
             welcomeDiv.textContent = 'Welcome!';
         }

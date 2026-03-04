@@ -15,15 +15,15 @@ require __DIR__ . '/../secrets/db.php'; //ignore this line, it has the actual cr
 /*
  above me is just the credentials for the database
 */
-$profEmail = null;
-if (isset($_GET['prof_email'])) {
-    $profEmail = trim((string)$_GET['prof_email']);
-    if ($profEmail === '') {
+$userId = null;
+if (isset($_GET['user_id'])) {
+    $userId = trim((string)$_GET['user_id']);
+    if ($userId === '') {
         http_response_code(400);
         header('Content-Type: application/json');
         echo json_encode([
             'ok' => false,
-            'error' => 'Missing prof_email',
+            'error' => 'Missing user_id',
         ]);
         exit;
     }
@@ -55,8 +55,8 @@ try {
 
     header('Content-Type: application/json');
 
-    if ($profEmail !== null) {
-        $stmt = $conn->prepare('SELECT prof_id FROM professor WHERE prof_email = ? LIMIT 1');
+    if ($userId !== null) {
+        $stmt = $conn->prepare('SELECT user_id, email FROM AppUser WHERE user_id = ? LIMIT 1');
         if ($stmt === false) {
             http_response_code(500);
             echo json_encode([
@@ -66,39 +66,29 @@ try {
             exit;
         }
 
-        $stmt->bind_param('s', $profEmail);
+        $stmt->bind_param('i', $userId);
         $stmt->execute();
         $res = $stmt->get_result();
         $row = $res ? $res->fetch_assoc() : null;
         $stmt->close();
 
         if ($row !== null) {
-            // Professor exists: send email with link
-            $profId = (int)$row['prof_id'];
-            $successLink = "http://localhost:8000/success.html?prof_id=" . urlencode($profId);
-            $subject = 'Your Login Link';
-            $message = "Hello,\n\nClick the link below to log in:\n" . $successLink . "\n\nIf you did not request this, ignore this email.\n";
-            $headers = "From: noreply@colloquim.local\r\n" .
-                       "Reply-To: noreply@colloquim.local\r\n" .
-                       "X-Mailer: PHP/" . phpversion();
-
-            // NOTE: mail() works only if PHP is configured with a mail server (e.g., postfix, sendmail, or SMTP in php.ini)
-            // For production, consider PHPMailer or an email service API.
-            $mailSent = mail($profEmail, $subject, $message, $headers);
-
+            // User exists: return success
+            $uid = (int)$row['user_id'];
+            $successLink = "http://localhost:8000/success.html?user_id=" . urlencode($uid);
             echo json_encode([
                 'ok' => true,
                 'exists' => true,
-                'prof_id' => $profId,
-                'mail_sent' => $mailSent,
+                'user_id' => $uid,
+                'link' => $successLink,
             ]);
             exit;
         } else {
-            // Professor not found
+            // User not found
             echo json_encode([
                 'ok' => true,
                 'exists' => false,
-                'prof_id' => null,
+                'user_id' => null,
             ]);
             exit;
         }

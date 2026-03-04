@@ -59,25 +59,20 @@ function checkUser(profEmail) {
 // Handle login form submission
 function handleLogin(event) {
     event.preventDefault();
-    const email = document.getElementById('email').value;
+    const userId = document.getElementById('userId').value;
     const resultDiv = document.getElementById('loginResult');
 
     // Show loading state
     resultDiv.textContent = 'Checking...';
 
-    // Reuse checkUser to verify professor exists
-    const url = 'backend.php?prof_email=' + encodeURIComponent(email);
+    // Call backend to verify user exists
+    const url = 'backend.php?user_id=' + encodeURIComponent(userId);
     fetch(url)
         .then(response => response.json())
         .then(data => {
             if (data && data.ok) {
                 if (data.exists) {
-                    // Real email attempted
-                    if (data.mail_sent) {
-                        resultDiv.innerHTML = `<div style="color: green;">Login link sent to your email.</div>`;
-                    } else {
-                        resultDiv.innerHTML = `<div style="color: orange;">Failed to send email (check server mail config). <a href="success.html?prof_id=${encodeURIComponent(data.prof_id)}">Click here to continue anyway</a></div>`;
-                    }
+                    window.location.href = data.link;
                 } else {
                     resultDiv.innerHTML = `<div style="color: red;">User does not exist, contact administrator.</div>`;
                 }
