@@ -9,7 +9,11 @@ $dbPass = '';
 
 
 
-require __DIR__ . '/../secrets/db.php'; //ignore this line, it has the actual credentials, 
+$dbConfigPath = __DIR__ . '/../secrets/db.php';
+if (!file_exists($dbConfigPath)) {
+    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
+}
+require $dbConfigPath;
 // refer to the creds in the commented line at the top and enter your local credentials
 
 /*
@@ -75,7 +79,9 @@ try {
         if ($row !== null) {
             // User exists: return success
             $uid = (int)$row['user_id'];
-            $successLink = "http://localhost:8000/success.html?user_id=" . urlencode($uid);
+            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+            $successLink = $scheme . '://' . $host . '/success.html?user_id=' . urlencode($uid);
             echo json_encode([
                 'ok' => true,
                 'exists' => true,

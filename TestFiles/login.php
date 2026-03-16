@@ -16,7 +16,11 @@
  */
 
 header('Content-Type: application/json');
-require __DIR__ . '/../secrets/db.php';
+$dbConfigPath = __DIR__ . '/../secrets/db.php';
+if (!file_exists($dbConfigPath)) {
+    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
+}
+require $dbConfigPath;
 
 /**
  * DATABASE CONNECTION

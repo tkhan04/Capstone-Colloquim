@@ -15,7 +15,11 @@
  */
 
 session_start();
-require __DIR__ . '/../secrets/db.php';
+$dbConfigPath = __DIR__ . '/../secrets/db.php';
+if (!file_exists($dbConfigPath)) {
+    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
+}
+require $dbConfigPath;
 
 $conn = new mysqli($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
 $dbError = null;
