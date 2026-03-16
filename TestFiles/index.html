@@ -3,27 +3,36 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login</title>
+    <title>Colloquium - Login</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
     <div class="container">
-        <img src="gburglogo.jpg" alt="Gettysburg College Logo" class="logo" sizes="(max-width: 768px) 100vw, 300px">
-        <h1>User Login</h1>
+        <img src="gburglogo.jpg" alt="Gettysburg College Logo" class="logo">
+        <h1><i class="fas fa-graduation-cap" style="color: #ff6600;"></i> Colloquium</h1>
+        <p class="login-subtitle">Sign in with your credentials</p>
+        
         <form id="loginForm" onsubmit="handleLogin(event)">
-            <input type="text" id="userId" placeholder="Enter your user ID" required>
-            <button type="submit">Login</button>
+            <!-- Login by Email -->
+            <div class="input-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" placeholder="yourname@gettysburg.edu" required>
+            </div>
+            
+            <button type="submit" class="btn-login">
+                <i class="fas fa-sign-in-alt"></i> Sign In
+            </button>
         </form>
+        
         <div id="loginResult"></div>
+        
+        <div class="login-footer">
+            <a href="attendance.php"><i class="fas fa-qrcode"></i> Event Check-In</a>
+        </div>
     </div>
     <script src="app.js"></script>
 </body>
 </html>
-
-<!--
-This is basic HTML file that will 
-call the PHP file to check if the connection 
-to the database is working.
--->
 
 
