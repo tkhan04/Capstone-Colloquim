@@ -31,11 +31,6 @@ $events = [];
 $courses = [];
 $students = [];
 $enrollments = [];
-$uploadedRosterFiles = [];
-$uploadSummary = null;
-$lastUploadJsonUrl = '';
-$lastUploadJsonName = '';
-$lastUploadPreview = [];
 
 /**
  * Normalizes CSV header names into lowercase snake_case keys.
@@ -62,6 +57,56 @@ function getCsvValueByKeys($row, $keys)
         }
     }
     return '';
+}
+
+/**
+ * Reads a CSV row with explicit delimiter, enclosure, and escape values
+ * to avoid deprecation warnings on newer PHP versions.
+ */
+function readCsvRow($handle)
+{
+    return fgetcsv($handle, 0, ',', '"', '\\');
+}
+
+/**
+ * Maps common CSV year values into the enum expected by Student.year.
+ */
+function normalizeCsvYear($rawYear)
+{
+    $year = strtolower(trim((string)$rawYear));
+
+    if ($year === '' || $year === 'freshman' || $year === 'freshmen' || $year === '1' || $year === '1st' || $year === 'first') {
+        return 'Freshman';
+    }
+    if ($year === 'sophomore' || $year === '2' || $year === '2nd' || $year === 'second') {
+        return 'Sophomore';
+    }
+    if ($year === 'junior' || $year === '3' || $year === '3rd' || $year === 'third') {
+        return 'Junior';
+    }
+    if ($year === 'senior' || $year === '4' || $year === '4th' || $year === 'fourth') {
+        return 'Senior';
+    }
+
+    return 'Freshman';
+}
+
+/**
+ * Generates a fallback username from an email local-part.
+ */
+function buildUsernameFromEmail($email)
+{
+    $localPart = strstr((string)$email, '@', true);
+    if ($localPart === false || $localPart === '') {
+        $localPart = 'student';
+    }
+
+    $base = preg_replace('/[^a-z0-9._-]/i', '', $localPart);
+    if ($base === '') {
+        $base = 'student';
+    }
+
+    return strtolower($base);
 }
 
 if ($conn->connect_error) {
@@ -176,7 +221,7 @@ if ($conn->connect_error) {
             $stmt->close();
         }
 
-        // UPLOAD CSV ROSTER -> PARSE -> GENERATE JSON -> IMPORT ENROLLMENTS
+        // UPLOAD CSV ROSTER -> ADD STUDENTS -> ENROLL TO SELECTED COURSE
         if ($action === 'upload_roster_csv') {
             $courseId = isset($_POST['course_id']) ? (int)$_POST['course_id'] : 0;
             $selectedCourseId = $courseId;
@@ -200,7 +245,7 @@ if ($conn->connect_error) {
                         $message = "Unable to read CSV file.";
                         $messageType = "error";
                     } else {
-                        $rawHeaders = fgetcsv($handle);
+                        $rawHeaders = readCsvRow($handle);
                         if ($rawHeaders === false) {
                             $message = "CSV file appears to be empty.";
                             $messageType = "error";
@@ -220,7 +265,7 @@ if ($conn->connect_error) {
 
                             $parsedRows = [];
                             $lineNumber = 1;
-                            while (($row = fgetcsv($handle)) !== false) {
+                            while (($row = readCsvRow($handle)) !== false) {
                                 $lineNumber++;
 
                                 $hasValue = false;
@@ -248,162 +293,203 @@ if ($conn->connect_error) {
                                 $message = "CSV has no data rows to import.";
                                 $messageType = "error";
                             } else {
-                                $uploadDir = __DIR__ . '/uploads/rosters';
-                                if (!is_dir($uploadDir) && !mkdir($uploadDir, 0775, true) && !is_dir($uploadDir)) {
-                                    $message = "Failed to create roster upload directory.";
+                                $createdStudents = 0;
+                                $enrolledCount = 0;
+                                $alreadyEnrolledCount = 0;
+                                $skippedRows = 0;
+
+                                $findStudentByEmailStmt = $conn->prepare("SELECT student_id FROM Student WHERE email = ? LIMIT 1");
+                                $findStudentByIdStmt = $conn->prepare("SELECT student_id FROM Student WHERE student_id = ? LIMIT 1");
+                                $findUserByEmailStmt = $conn->prepare("SELECT user_id, role FROM AppUser WHERE email = ? LIMIT 1");
+                                $insertUserStmt = $conn->prepare("INSERT INTO AppUser (username, email, role) VALUES (?, ?, 'student')");
+                                $insertStudentAutoStmt = $conn->prepare("INSERT INTO Student (user_id, first_name, last_name, email, year) VALUES (?, ?, ?, ?, ?)");
+                                $insertStudentWithIdStmt = $conn->prepare("INSERT INTO Student (student_id, user_id, first_name, last_name, email, year) VALUES (?, ?, ?, ?, ?, ?)");
+                                $checkEnrollmentStmt = $conn->prepare("SELECT enrollment_id FROM EnrollmentInCourses WHERE student_id = ? AND course_id = ? LIMIT 1");
+                                $insertEnrollmentStmt = $conn->prepare("INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')");
+
+                                if (
+                                    $findStudentByEmailStmt === false ||
+                                    $findStudentByIdStmt === false ||
+                                    $findUserByEmailStmt === false ||
+                                    $insertUserStmt === false ||
+                                    $insertStudentAutoStmt === false ||
+                                    $insertStudentWithIdStmt === false ||
+                                    $checkEnrollmentStmt === false ||
+                                    $insertEnrollmentStmt === false
+                                ) {
+                                    $message = "Could not prepare statements for roster import.";
                                     $messageType = "error";
                                 } else {
-                                    $baseName = pathinfo($originalName, PATHINFO_FILENAME);
-                                    $safeBase = preg_replace('/[^A-Za-z0-9_-]/', '_', (string)$baseName);
-                                    if ($safeBase === '') {
-                                        $safeBase = 'roster';
-                                    }
-
-                                    $jsonFileName = 'course_' . $courseId . '_' . $safeBase . '_' . date('Ymd_His') . '.json';
-                                    $jsonPath = $uploadDir . '/' . $jsonFileName;
-
-                                    $jsonPayload = [
-                                        'course_id' => $courseId,
-                                        'source_csv' => $originalName,
-                                        'uploaded_at' => date('c'),
-                                        'row_count' => count($parsedRows),
-                                        'rows' => $parsedRows,
-                                    ];
-
-                                    $jsonWritten = file_put_contents(
-                                        $jsonPath,
-                                        json_encode($jsonPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
-                                    );
-
-                                    if ($jsonWritten === false) {
-                                        $message = "CSV parsed, but JSON file could not be written.";
-                                        $messageType = "error";
-                                    } else {
-                                        // Extract rows back from generated JSON before importing.
-                                        $decodedJson = json_decode((string)file_get_contents($jsonPath), true);
-                                        $rowsFromJson = [];
-                                        if (is_array($decodedJson) && isset($decodedJson['rows']) && is_array($decodedJson['rows'])) {
-                                            $rowsFromJson = $decodedJson['rows'];
+                                    foreach ($parsedRows as $csvRow) {
+                                        if (!is_array($csvRow)) {
+                                            $skippedRows++;
+                                            continue;
                                         }
 
-                                        $rowCount = count($rowsFromJson);
-                                        $processedCount = 0;
-                                        $enrolledCount = 0;
-                                        $alreadyEnrolledCount = 0;
-                                        $missingEmailCount = 0;
-                                        $invalidRowCount = 0;
-                                        $missingEmails = [];
+                                        $email = strtolower(getCsvValueByKeys($csvRow, ['email', 'student_email', 'studentemail', 'mail', 'e_mail']));
+                                        if ($email === '') {
+                                            $skippedRows++;
+                                            continue;
+                                        }
 
-                                        $findStudentStmt = $conn->prepare("SELECT student_id FROM Student WHERE email = ? LIMIT 1");
-                                        $checkEnrollmentStmt = $conn->prepare("SELECT enrollment_id FROM EnrollmentInCourses WHERE student_id = ? AND course_id = ? LIMIT 1");
-                                        $insertEnrollmentStmt = $conn->prepare("INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')");
+                                        $firstName = getCsvValueByKeys($csvRow, ['first_name', 'firstname', 'given_name']);
+                                        $lastName = getCsvValueByKeys($csvRow, ['last_name', 'lastname', 'surname', 'family_name']);
+                                        $fullName = getCsvValueByKeys($csvRow, ['name', 'full_name', 'student_name']);
+                                        if (($firstName === '' || $lastName === '') && $fullName !== '') {
+                                            $nameParts = preg_split('/\s+/', trim($fullName));
+                                            if (is_array($nameParts) && count($nameParts) > 0) {
+                                                if ($firstName === '') {
+                                                    $firstName = (string)array_shift($nameParts);
+                                                }
+                                                if ($lastName === '') {
+                                                    $lastName = trim(implode(' ', $nameParts));
+                                                }
+                                            }
+                                        }
+                                        if ($firstName === '') {
+                                            $firstName = 'Student';
+                                        }
+                                        if ($lastName === '') {
+                                            $lastName = 'User';
+                                        }
 
-                                        if ($findStudentStmt === false || $checkEnrollmentStmt === false || $insertEnrollmentStmt === false) {
-                                            $message = "Could not prepare statements for roster import.";
-                                            $messageType = "error";
-                                            if ($findStudentStmt) {
-                                                $findStudentStmt->close();
+                                        $year = normalizeCsvYear(getCsvValueByKeys($csvRow, ['year', 'class_year', 'classyear']));
+                                        $csvStudentIdRaw = getCsvValueByKeys($csvRow, ['student_id', 'studentid', 'id', 'student_number', 'student_no']);
+                                        $csvStudentId = ctype_digit($csvStudentIdRaw) ? (int)$csvStudentIdRaw : 0;
+
+                                        $studentId = 0;
+
+                                        if ($csvStudentId > 0) {
+                                            $findStudentByIdStmt->bind_param('i', $csvStudentId);
+                                            $findStudentByIdStmt->execute();
+                                            $existingById = $findStudentByIdStmt->get_result()->fetch_assoc();
+                                            if ($existingById) {
+                                                $studentId = (int)$existingById['student_id'];
                                             }
-                                            if ($checkEnrollmentStmt) {
-                                                $checkEnrollmentStmt->close();
+                                        }
+
+                                        if ($studentId === 0) {
+                                            $findStudentByEmailStmt->bind_param('s', $email);
+                                            $findStudentByEmailStmt->execute();
+                                            $existingByEmail = $findStudentByEmailStmt->get_result()->fetch_assoc();
+                                            if ($existingByEmail) {
+                                                $studentId = (int)$existingByEmail['student_id'];
                                             }
-                                            if ($insertEnrollmentStmt) {
-                                                $insertEnrollmentStmt->close();
-                                            }
-                                        } else {
-                                            foreach ($rowsFromJson as $csvRow) {
-                                                if (!is_array($csvRow)) {
+                                        }
+
+                                        if ($studentId === 0) {
+                                            $userId = 0;
+
+                                            $findUserByEmailStmt->bind_param('s', $email);
+                                            $findUserByEmailStmt->execute();
+                                            $existingUser = $findUserByEmailStmt->get_result()->fetch_assoc();
+
+                                            if ($existingUser) {
+                                                if (($existingUser['role'] ?? '') !== 'student') {
+                                                    $skippedRows++;
                                                     continue;
                                                 }
-
-                                                $processedCount++;
-                                                $email = strtolower(getCsvValueByKeys($csvRow, ['email', 'student_email', 'studentemail', 'mail', 'e_mail']));
-                                                if ($email === '') {
-                                                    $invalidRowCount++;
-                                                    continue;
-                                                }
-
-                                                $findStudentStmt->bind_param('s', $email);
-                                                $findStudentStmt->execute();
-                                                $student = $findStudentStmt->get_result()->fetch_assoc();
-
-                                                if (!$student) {
-                                                    $missingEmailCount++;
-                                                    if (count($missingEmails) < 10) {
-                                                        $missingEmails[] = $email;
+                                                $userId = (int)$existingUser['user_id'];
+                                            } else {
+                                                $baseUsername = buildUsernameFromEmail($email);
+                                                for ($attempt = 0; $attempt < 5; $attempt++) {
+                                                    $candidate = $baseUsername;
+                                                    if ($attempt > 0) {
+                                                        $candidate .= '_' . substr(bin2hex(random_bytes(2)), 0, 4);
                                                     }
-                                                    continue;
-                                                }
 
-                                                $studentId = (int)$student['student_id'];
-                                                $checkEnrollmentStmt->bind_param('ii', $studentId, $courseId);
-                                                $checkEnrollmentStmt->execute();
-                                                $existingEnrollment = $checkEnrollmentStmt->get_result()->fetch_assoc();
+                                                    $insertUserStmt->bind_param('ss', $candidate, $email);
+                                                    if ($insertUserStmt->execute()) {
+                                                        $userId = (int)$conn->insert_id;
+                                                        break;
+                                                    }
 
-                                                if ($existingEnrollment) {
-                                                    $alreadyEnrolledCount++;
-                                                    continue;
-                                                }
-
-                                                $insertEnrollmentStmt->bind_param('ii', $studentId, $courseId);
-                                                if ($insertEnrollmentStmt->execute()) {
-                                                    $enrolledCount++;
+                                                    if ((int)$conn->errno !== 1062) {
+                                                        break;
+                                                    }
                                                 }
                                             }
 
-                                            $findStudentStmt->close();
-                                            $checkEnrollmentStmt->close();
-                                            $insertEnrollmentStmt->close();
+                                            if ($userId <= 0) {
+                                                $skippedRows++;
+                                                continue;
+                                            }
 
-                                            $uploadSummary = [
-                                                'rowCount' => $rowCount,
-                                                'processedCount' => $processedCount,
-                                                'enrolledCount' => $enrolledCount,
-                                                'alreadyEnrolledCount' => $alreadyEnrolledCount,
-                                                'missingEmailCount' => $missingEmailCount,
-                                                'invalidRowCount' => $invalidRowCount,
-                                                'missingEmails' => $missingEmails,
-                                            ];
+                                            $inserted = false;
+                                            if ($csvStudentId > 0) {
+                                                $insertStudentWithIdStmt->bind_param('iissss', $csvStudentId, $userId, $firstName, $lastName, $email, $year);
+                                                $inserted = $insertStudentWithIdStmt->execute();
+                                                if (!$inserted && (int)$conn->errno === 1062) {
+                                                    $insertStudentAutoStmt->bind_param('issss', $userId, $firstName, $lastName, $email, $year);
+                                                    $inserted = $insertStudentAutoStmt->execute();
+                                                }
+                                            } else {
+                                                $insertStudentAutoStmt->bind_param('issss', $userId, $firstName, $lastName, $email, $year);
+                                                $inserted = $insertStudentAutoStmt->execute();
+                                            }
 
-                                            $lastUploadPreview = array_slice($rowsFromJson, 0, 10);
-                                            $lastUploadJsonName = $jsonFileName;
-                                            $lastUploadJsonUrl = 'uploads/rosters/' . rawurlencode($jsonFileName);
+                                            if (!$inserted) {
+                                                $skippedRows++;
+                                                continue;
+                                            }
 
-                                            $message = "CSV parsed and JSON generated. Imported "
-                                                . $enrolledCount
-                                                . " student(s), "
-                                                . $alreadyEnrolledCount
-                                                . " already enrolled, "
-                                                . $missingEmailCount
-                                                . " email(s) not found.";
-                                            $messageType = "success";
+                                            $findStudentByEmailStmt->bind_param('s', $email);
+                                            $findStudentByEmailStmt->execute();
+                                            $createdStudent = $findStudentByEmailStmt->get_result()->fetch_assoc();
+
+                                            if (!$createdStudent) {
+                                                $skippedRows++;
+                                                continue;
+                                            }
+
+                                            $studentId = (int)$createdStudent['student_id'];
+                                            $createdStudents++;
+                                        }
+
+                                        $checkEnrollmentStmt->bind_param('ii', $studentId, $courseId);
+                                        $checkEnrollmentStmt->execute();
+                                        $existingEnrollment = $checkEnrollmentStmt->get_result()->fetch_assoc();
+
+                                        if ($existingEnrollment) {
+                                            $alreadyEnrolledCount++;
+                                            continue;
+                                        }
+
+                                        $insertEnrollmentStmt->bind_param('ii', $studentId, $courseId);
+                                        if ($insertEnrollmentStmt->execute()) {
+                                            $enrolledCount++;
+                                        } else {
+                                            $skippedRows++;
                                         }
                                     }
+
+                                    $findStudentByEmailStmt->close();
+                                    $findStudentByIdStmt->close();
+                                    $findUserByEmailStmt->close();
+                                    $insertUserStmt->close();
+                                    $insertStudentAutoStmt->close();
+                                    $insertStudentWithIdStmt->close();
+                                    $checkEnrollmentStmt->close();
+                                    $insertEnrollmentStmt->close();
+
+                                    $message = "Upload complete. "
+                                        . $createdStudents
+                                        . " new student(s) added, "
+                                        . $enrolledCount
+                                        . " enrolled to this course, "
+                                        . $alreadyEnrolledCount
+                                        . " already enrolled.";
+
+                                    if ($skippedRows > 0) {
+                                        $message .= " " . $skippedRows . " row(s) were skipped.";
+                                    }
+
+                                    $messageType = "success";
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
-    }
-
-    // FETCH UPLOADED ROSTER JSON FILES
-    $uploadDir = __DIR__ . '/uploads/rosters';
-    if (is_dir($uploadDir)) {
-        $jsonFiles = glob($uploadDir . '/*.json');
-        if (is_array($jsonFiles)) {
-            usort($jsonFiles, function ($a, $b) {
-                return filemtime($b) <=> filemtime($a);
-            });
-
-            foreach (array_slice($jsonFiles, 0, 20) as $jsonFile) {
-                $baseName = basename($jsonFile);
-                $uploadedRosterFiles[] = [
-                    'name' => $baseName,
-                    'url' => 'uploads/rosters/' . rawurlencode($baseName),
-                    'modified' => date('M j, Y g:i A', (int)filemtime($jsonFile)),
-                ];
             }
         }
     }
@@ -421,7 +507,7 @@ if ($conn->connect_error) {
     }
 
     // FETCH STUDENTS
-    $studentQuery = $conn->query("SELECT student_id, first_name, last_name, email, year FROM Student ORDER BY last_name, first_name");
+    $studentQuery = $conn->query("SELECT student_id, first_name, last_name, email FROM Student ORDER BY last_name, first_name");
     while ($row = $studentQuery->fetch_assoc()) {
         $students[] = $row;
     }
@@ -429,7 +515,7 @@ if ($conn->connect_error) {
     // FETCH ENROLLMENTS for roster view
     if ($selectedCourseId) {
         $enrollQuery = $conn->prepare("
-            SELECT e.enrollment_id, e.status, s.student_id, s.first_name, s.last_name, s.email, s.year
+            SELECT e.enrollment_id, e.status, s.student_id, s.first_name, s.last_name, s.email
             FROM EnrollmentInCourses e
             JOIN Student s ON e.student_id = s.student_id
             WHERE e.course_id = ?
@@ -595,116 +681,25 @@ if ($conn->connect_error) {
                 </select>
             </div>
 
-            <div class="uploaded-rosters">
-                <h3>Uploaded Rosters (JSON)</h3>
-                <?php if (empty($uploadedRosterFiles)): ?>
-                <p class="uploaded-empty">No roster uploads yet.</p>
-                <?php else: ?>
-                <ul class="roster-file-list">
-                    <?php foreach ($uploadedRosterFiles as $rosterFile): ?>
-                    <li>
-                        <a href="<?php echo htmlspecialchars($rosterFile['url']); ?>" target="_blank" rel="noopener">
-                            <i class="fas fa-file-code"></i>
-                            <?php echo htmlspecialchars($rosterFile['name']); ?>
-                        </a>
-                        <span><?php echo htmlspecialchars($rosterFile['modified']); ?></span>
-                    </li>
-                    <?php endforeach; ?>
-                </ul>
-                <?php endif; ?>
-            </div>
-
             <?php if ($selectedCourseId): ?>
             <div class="upload-card">
                 <div class="upload-card-header">
                     <h3>Upload CSV Roster</h3>
-                    <?php if ($lastUploadJsonUrl): ?>
-                    <a class="json-link" href="<?php echo htmlspecialchars($lastUploadJsonUrl); ?>" target="_blank" rel="noopener">
-                        <i class="fas fa-file-arrow-down"></i>
-                        View Generated JSON
-                    </a>
-                    <?php endif; ?>
                 </div>
 
-                <form method="POST" enctype="multipart/form-data" class="upload-form">
+                <form method="POST" enctype="multipart/form-data" class="upload-form" id="rosterUploadForm">
                     <input type="hidden" name="action" value="upload_roster_csv">
                     <input type="hidden" name="course_id" value="<?php echo $selectedCourseId; ?>">
 
-                    <input type="file" name="roster_csv" accept=".csv,text/csv" required>
-                    <button type="submit" class="btn-primary">
-                        <i class="fas fa-upload"></i> Upload CSV
-                    </button>
+                    <input type="file" name="roster_csv" id="rosterCsvInput" class="upload-input" accept=".csv,text/csv" required>
+                    <label for="rosterCsvInput" id="rosterDropzone" class="upload-dropzone">
+                        <i class="fas fa-cloud-arrow-up"></i>
+                        <span>Drag and drop a CSV here, or click to choose</span>
+                    </label>
+                    <p class="upload-selected" id="uploadSelectedFile">No file selected.</p>
                 </form>
-                <p class="upload-hint">Required column: email. Optional columns: first_name, last_name, year.</p>
+                <p class="upload-hint">Upload CSV with student_id, first_name, last_name, and email. Students are added and enrolled automatically.</p>
             </div>
-
-            <?php if ($uploadSummary): ?>
-            <div class="upload-summary">
-                <h4>Last Upload Summary</h4>
-                <div class="summary-grid">
-                    <div>
-                        <strong><?php echo (int)$uploadSummary['rowCount']; ?></strong>
-                        <span>Rows Parsed</span>
-                    </div>
-                    <div>
-                        <strong><?php echo (int)$uploadSummary['enrolledCount']; ?></strong>
-                        <span>New Enrollments</span>
-                    </div>
-                    <div>
-                        <strong><?php echo (int)$uploadSummary['alreadyEnrolledCount']; ?></strong>
-                        <span>Already Enrolled</span>
-                    </div>
-                    <div>
-                        <strong><?php echo (int)$uploadSummary['missingEmailCount']; ?></strong>
-                        <span>Emails Not Found</span>
-                    </div>
-                </div>
-
-                <?php if (!empty($uploadSummary['missingEmails'])): ?>
-                <p class="summary-note">
-                    <strong>Sample missing emails:</strong>
-                    <?php echo htmlspecialchars(implode(', ', $uploadSummary['missingEmails'])); ?>
-                    <?php if ((int)$uploadSummary['missingEmailCount'] > count($uploadSummary['missingEmails'])): ?>
-                        ... and <?php echo (int)$uploadSummary['missingEmailCount'] - count($uploadSummary['missingEmails']); ?> more.
-                    <?php endif; ?>
-                </p>
-                <?php endif; ?>
-
-                <?php if (!empty($lastUploadJsonName)): ?>
-                <p class="summary-note">
-                    <strong>JSON File:</strong> <?php echo htmlspecialchars($lastUploadJsonName); ?>
-                </p>
-                <?php endif; ?>
-            </div>
-            <?php endif; ?>
-
-            <?php if (!empty($lastUploadPreview)): ?>
-            <div class="parsed-preview">
-                <h4>Parsed JSON Preview (First <?php echo count($lastUploadPreview); ?> rows)</h4>
-                <table class="roster-table">
-                    <thead>
-                        <tr>
-                            <th>Row</th>
-                            <th>Email</th>
-                            <th>First Name</th>
-                            <th>Last Name</th>
-                            <th>Year</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($lastUploadPreview as $csvRow): ?>
-                        <tr>
-                            <td><?php echo isset($csvRow['_row_number']) ? (int)$csvRow['_row_number'] : 0; ?></td>
-                            <td><?php echo htmlspecialchars(getCsvValueByKeys($csvRow, ['email', 'student_email', 'studentemail', 'mail', 'e_mail'])); ?></td>
-                            <td><?php echo htmlspecialchars(getCsvValueByKeys($csvRow, ['first_name', 'firstname', 'given_name'])); ?></td>
-                            <td><?php echo htmlspecialchars(getCsvValueByKeys($csvRow, ['last_name', 'lastname', 'surname', 'family_name'])); ?></td>
-                            <td><?php echo htmlspecialchars(getCsvValueByKeys($csvRow, ['year', 'class_year', 'classyear'])); ?></td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-            <?php endif; ?>
 
             <!-- Add Student Form -->
             <div class="add-student-form">
@@ -739,7 +734,6 @@ if ($conn->connect_error) {
                         <tr>
                             <th>Name</th>
                             <th>Email</th>
-                            <th>Year</th>
                             <th>Action</th>
                         </tr>
                     </thead>
@@ -748,7 +742,6 @@ if ($conn->connect_error) {
                         <tr>
                             <td><?php echo htmlspecialchars($enrollment['first_name'] . ' ' . $enrollment['last_name']); ?></td>
                             <td><?php echo htmlspecialchars($enrollment['email']); ?></td>
-                            <td><?php echo htmlspecialchars($enrollment['year']); ?></td>
                             <td>
                                 <form method="POST" class="inline" onsubmit="return confirm('Remove this student?');">
                                     <input type="hidden" name="action" value="remove_from_roster">
@@ -785,6 +778,60 @@ if ($conn->connect_error) {
     function closeModal(modalId) {
         document.getElementById(modalId).classList.remove('active');
     }
+
+    /**
+     * CSV drag-and-drop upload: selecting or dropping a file auto-submits form.
+     */
+    (function setupRosterCsvAutoUpload() {
+        const form = document.getElementById('rosterUploadForm');
+        const fileInput = document.getElementById('rosterCsvInput');
+        const dropzone = document.getElementById('rosterDropzone');
+        const selectedText = document.getElementById('uploadSelectedFile');
+
+        if (!form || !fileInput || !dropzone || !selectedText) {
+            return;
+        }
+
+        function setSelectedFile(file) {
+            selectedText.textContent = file ? `Selected: ${file.name}` : 'No file selected.';
+        }
+
+        function submitAfterFileSelection(fileList) {
+            if (!fileList || fileList.length === 0) {
+                return;
+            }
+
+            const file = fileList[0];
+            setSelectedFile(file);
+            selectedText.textContent = `Uploading: ${file.name} ...`;
+            form.submit();
+        }
+
+        fileInput.addEventListener('change', function () {
+            submitAfterFileSelection(fileInput.files);
+        });
+
+        dropzone.addEventListener('dragover', function (event) {
+            event.preventDefault();
+            dropzone.classList.add('is-dragover');
+        });
+
+        dropzone.addEventListener('dragleave', function () {
+            dropzone.classList.remove('is-dragover');
+        });
+
+        dropzone.addEventListener('drop', function (event) {
+            event.preventDefault();
+            dropzone.classList.remove('is-dragover');
+
+            if (!event.dataTransfer || !event.dataTransfer.files || event.dataTransfer.files.length === 0) {
+                return;
+            }
+
+            fileInput.files = event.dataTransfer.files;
+            submitAfterFileSelection(event.dataTransfer.files);
+        });
+    })();
     
     // Close modal when clicking outside
     window.onclick = function(event) {
