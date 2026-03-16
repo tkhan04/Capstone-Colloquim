@@ -1,21 +1,38 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Hello World</title> <!-- This is just found in the url -->
-</head>  
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Colloquium - Login</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
 <body>
-    <h1>Hello Capstone!</h1> <!-- This is just the large text tile-->
-    <button onclick="callPHP()">Call PHP</button> <!-- This is just a button-->
-    <div id="result"></div> <!-- This is where the result will be displayed-->
-    <div id="database"></div> <!-- This is where the database will be displayed-->
-    <script src="app.js"></script> <!-- this refers to the js script file which refers to our php file-->
+    <div class="container">
+        <img src="gburglogo.jpg" alt="Gettysburg College Logo" class="logo">
+        <h1><i class="fas fa-graduation-cap" style="color: #ff6600;"></i> Colloquium</h1>
+        <p class="login-subtitle">Sign in with your credentials</p>
+        
+        <form id="loginForm" onsubmit="handleLogin(event)">
+            <!-- Login by Email -->
+            <div class="input-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" placeholder="yourname@gettysburg.edu" required>
+            </div>
+            
+            <button type="submit" class="btn-login">
+                <i class="fas fa-sign-in-alt"></i> Sign In
+            </button>
+        </form>
+        
+        <div id="loginResult"></div>
+        
+        <div class="login-footer">
+            <a href="attendance.php"><i class="fas fa-qrcode"></i> Event Check-In</a>
+        </div>
+    </div>
+    <script src="app.js"></script>
 </body>
 </html>
-
-<!--
-This is basic HTML file that will 
-call the PHP file to check if the connection 
-to the database is working.
--->
 
 
