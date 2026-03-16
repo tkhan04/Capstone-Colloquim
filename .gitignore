@@ -1,1 +1,4 @@
 secrets/db.php
+.DS_Store
+TestFiles/.DS_Store
+TestFiles/uploads/
