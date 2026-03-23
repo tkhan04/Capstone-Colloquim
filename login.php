@@ -1,4 +1,8 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('log_errors', 1);
+ini_set('error_log', __DIR__ . '/php_errors.log');
+error_reporting(E_ALL);
 /**
  * LOGIN.PHP - Authentication Handler for Colloquium System
  * 
@@ -62,7 +66,7 @@ if (empty($email)) {
  * Queries AppUser table to find matching user
  * Returns user_id and role if found
  */
-$stmt = $pdo->prepare("SELECT user_id, username, email, role FROM AppUser WHERE email = ? LIMIT 1");
+$stmt = $pdo->prepare("SELECT user_id, display_name, email, role FROM app_user WHERE email = ? LIMIT 1");
 $stmt->execute([$email]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
@@ -90,12 +94,12 @@ switch ($user['role']) {
          * PROFESSOR LOGIN
          * Fetch professor_id from Professor table using user_id
          */
-        $profStmt = $pdo->prepare("SELECT professor_id FROM Professor WHERE user_id = ?");
+        $profStmt = $pdo->prepare("SELECT prof_id FROM professor WHERE user_id = ?");
         $profStmt->execute([$user['user_id']]);
         $professor = $profStmt->fetch(PDO::FETCH_ASSOC);
         
         if ($professor) {
-            $roleId = $professor['professor_id'];
+            $roleId = $professor['prof_id'];
             $redirectUrl = "prof_dashboard.php?prof_id=" . $roleId;
         } else {
             echo json_encode([
@@ -111,7 +115,7 @@ switch ($user['role']) {
          * STUDENT LOGIN
          * Fetch student_id from Student table using user_id
          */
-        $stuStmt = $pdo->prepare("SELECT student_id FROM Student WHERE user_id = ?");
+        $stuStmt = $pdo->prepare("SELECT student_id FROM student WHERE user_id = ?");
         $stuStmt->execute([$user['user_id']]);
         $student = $stuStmt->fetch(PDO::FETCH_ASSOC);
         
@@ -153,7 +157,7 @@ echo json_encode([
     'exists' => true,
     'user' => [
         'user_id' => $user['user_id'],
-        'username' => $user['username'],
+        'username' => $user['display_name'],
         'email' => $user['email'],
         'role' => $user['role'],
         'role_id' => $roleId

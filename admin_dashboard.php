@@ -117,7 +117,7 @@ if ($conn->connect_error) {
     $dbError = "Database connection failed: " . $conn->connect_error;
 } else {
     // Get admin info
-    $adminQuery = $conn->prepare("SELECT user_id, username, email FROM AppUser WHERE user_id = ? AND role = 'admin'");
+    $adminQuery = $conn->prepare("SELECT user_id, display_name, email FROM app_user WHERE user_id = ? AND role = 'admin'");
     $adminQuery->bind_param('i', $adminId);
     $adminQuery->execute();
     $admin = $adminQuery->get_result()->fetch_assoc();
@@ -149,7 +149,7 @@ if ($conn->connect_error) {
                 $startToken = bin2hex(random_bytes(16));
                 $endToken = bin2hex(random_bytes(16));
 
-                $stmt = $conn->prepare("INSERT INTO Event (event_name, event_type, start_time, end_time, location, start_qr_token, end_qr_token) VALUES (?, ?, ?, ?, ?, ?, ?)");
+                $stmt = $conn->prepare("INSERT INTO event (event_name, event_type, start_time, end_time, location, start_qr_token, end_qr_token) VALUES (?, ?, ?, ?, ?, ?, ?)");
                 $stmt->bind_param('sssssss', $eventName, $eventType, $startTime, $endTime, $location, $startToken, $endToken);
 
                 if ($stmt->execute()) {
@@ -166,7 +166,7 @@ if ($conn->connect_error) {
         // DELETE EVENT
         if ($action === 'delete_event') {
             $eventId = (int)$_POST['event_id'];
-            $stmt = $conn->prepare("DELETE FROM Event WHERE event_id = ?");
+            $stmt = $conn->prepare("DELETE FROM event WHERE event_id = ?");
             $stmt->bind_param('i', $eventId);
 
             if ($stmt->execute()) {
@@ -185,7 +185,7 @@ if ($conn->connect_error) {
             $courseId = (int)$_POST['course_id'];
 
             // Check if already enrolled
-            $checkStmt = $conn->prepare("SELECT enrollment_id FROM EnrollmentInCourses WHERE student_id = ? AND course_id = ?");
+            $checkStmt = $conn->prepare("SELECT enrollment_id FROM enrollment WHERE student_id = ? AND course_id = ?");
             $checkStmt->bind_param('ii', $studentId, $courseId);
             $checkStmt->execute();
             $existing = $checkStmt->get_result()->fetch_assoc();
@@ -195,7 +195,7 @@ if ($conn->connect_error) {
                 $message = "Student is already enrolled in this course.";
                 $messageType = "error";
             } else {
-                $stmt = $conn->prepare("INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')");
+                $stmt = $conn->prepare("INSERT INTO enrollment (student_id, course_id, status) VALUES (?, ?, 'active')");
                 $stmt->bind_param('ii', $studentId, $courseId);
 
                 if ($stmt->execute()) {
@@ -212,7 +212,7 @@ if ($conn->connect_error) {
         // REMOVE FROM ROSTER
         if ($action === 'remove_from_roster') {
             $enrollmentId = (int)$_POST['enrollment_id'];
-            $stmt = $conn->prepare("DELETE FROM EnrollmentInCourses WHERE enrollment_id = ?");
+            $stmt = $conn->prepare("DELETE FROM enrollment WHERE enrollment_id = ?");
             $stmt->bind_param('i', $enrollmentId);
 
             if ($stmt->execute()) {
@@ -302,14 +302,14 @@ if ($conn->connect_error) {
                                 $alreadyEnrolledCount = 0;
                                 $skippedRows = 0;
 
-                                $findStudentByEmailStmt = $conn->prepare("SELECT student_id FROM Student WHERE email = ? LIMIT 1");
-                                $findStudentByIdStmt = $conn->prepare("SELECT student_id FROM Student WHERE student_id = ? LIMIT 1");
-                                $findUserByEmailStmt = $conn->prepare("SELECT user_id, role FROM AppUser WHERE email = ? LIMIT 1");
-                                $insertUserStmt = $conn->prepare("INSERT INTO AppUser (username, email, role) VALUES (?, ?, 'student')");
-                                $insertStudentAutoStmt = $conn->prepare("INSERT INTO Student (user_id, first_name, last_name, email, year) VALUES (?, ?, ?, ?, ?)");
-                                $insertStudentWithIdStmt = $conn->prepare("INSERT INTO Student (student_id, user_id, first_name, last_name, email, year) VALUES (?, ?, ?, ?, ?, ?)");
-                                $checkEnrollmentStmt = $conn->prepare("SELECT enrollment_id FROM EnrollmentInCourses WHERE student_id = ? AND course_id = ? LIMIT 1");
-                                $insertEnrollmentStmt = $conn->prepare("INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')");
+                                $findStudentByEmailStmt = $conn->prepare("SELECT student_id FROM student WHERE email = ? LIMIT 1");
+                                $findStudentByIdStmt = $conn->prepare("SELECT student_id FROM student WHERE student_id = ? LIMIT 1");
+                                $findUserByEmailStmt = $conn->prepare("SELECT user_id, role FROM app_user WHERE email = ? LIMIT 1");
+                                $insertUserStmt = $conn->prepare("INSERT INTO app_user (display_name, email, role) VALUES (?, ?, 'student')");
+                                $insertStudentAutoStmt = $conn->prepare("INSERT INTO student (user_id, name, email, year) VALUES (?, ?, ?, ?)");
+                                $insertStudentWithIdStmt = $conn->prepare("INSERT INTO student (student_id, user_id, name, email, year) VALUES (?, ?, ?, ?, ?)");
+                                $checkEnrollmentStmt = $conn->prepare("SELECT enrollment_id FROM enrollment WHERE student_id = ? AND course_id = ? LIMIT 1");
+                                $insertEnrollmentStmt = $conn->prepare("INSERT INTO enrollment (student_id, course_id, status) VALUES (?, ?, 'active')");
 
                                 if (
                                     $findStudentByEmailStmt === false ||
@@ -499,19 +499,19 @@ if ($conn->connect_error) {
     }
 
     // FETCH EVENTS
-    $eventQuery = $conn->query("SELECT event_id, event_name, event_type, start_time, end_time, location FROM Event ORDER BY start_time DESC");
+    $eventQuery = $conn->query("SELECT event_id, event_name, event_type, start_time, end_time, location FROM event ORDER BY start_time DESC");
     while ($row = $eventQuery->fetch_assoc()) {
         $events[] = $row;
     }
 
     // FETCH COURSES
-    $courseQuery = $conn->query("SELECT course_id, course_name, course_code, section, semester FROM Course ORDER BY course_code");
+    $courseQuery = $conn->query("SELECT course_id, course_name, course_code, section, semester FROM course ORDER BY course_code");
     while ($row = $courseQuery->fetch_assoc()) {
         $courses[] = $row;
     }
 
     // FETCH STUDENTS
-    $studentQuery = $conn->query("SELECT student_id, first_name, last_name, email FROM Student ORDER BY last_name, first_name");
+    $studentQuery = $conn->query("SELECT student_id, name, email FROM student ORDER BY name");
     while ($row = $studentQuery->fetch_assoc()) {
         $students[] = $row;
     }
@@ -519,11 +519,11 @@ if ($conn->connect_error) {
     // FETCH ENROLLMENTS for roster view
     if ($selectedCourseId) {
         $enrollQuery = $conn->prepare("
-            SELECT e.enrollment_id, e.status, s.student_id, s.first_name, s.last_name, s.email
-            FROM EnrollmentInCourses e
-            JOIN Student s ON e.student_id = s.student_id
+            SELECT e.enrollment_id, e.status, s.student_id, s.name, s.email
+            FROM enrollment e
+            JOIN student s ON e.student_id = s.student_id
             WHERE e.course_id = ?
-            ORDER BY s.last_name, s.first_name
+            ORDER BY s.name
         ");
         $enrollQuery->bind_param('i', $selectedCourseId);
         $enrollQuery->execute();

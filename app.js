@@ -131,3 +131,40 @@ function checkUser(profEmail) {
             document.getElementById('database').innerHTML = '';
         });
 }
+function handleLogin(event) {
+    event.preventDefault();
+    
+    const email = document.getElementById('email').value.trim();
+    const resultDiv = document.getElementById('loginResult');
+    
+    if (!email) {
+        resultDiv.innerHTML = '<div class="login-error"><i class="fas fa-exclamation-circle"></i> Please enter your email address.</div>';
+        return;
+    }
+    
+    resultDiv.innerHTML = '<div class="login-loading"><i class="fas fa-spinner fa-spin"></i> Signing in...</div>';
+    
+    const url = 'login.php?email=' + encodeURIComponent(email);
+    
+    fetch(url)
+        .then(response => response.text())  // Changed to .text()
+        .then(text => {
+            console.log('Raw response:', text);  // Debug log
+            const data = JSON.parse(text);
+            
+            if (data && data.ok) {
+                const roleName = data.user.role.charAt(0).toUpperCase() + data.user.role.slice(1);
+                resultDiv.innerHTML = `<div class="login-success"><i class="fas fa-check-circle"></i> Welcome, ${roleName}! Redirecting...</div>`;
+                
+                setTimeout(() => {
+                    window.location.href = data.redirect;
+                }, 1000);
+            } else {
+                const errMsg = (data && data.error) ? data.error : 'Unknown error';
+                resultDiv.innerHTML = `<div class="login-error"><i class="fas fa-exclamation-triangle"></i> ${errMsg}</div>`;
+            }
+        })
+        .catch(error => {
+            resultDiv.innerHTML = `<div class="login-error"><i class="fas fa-wifi"></i> Connection error: ${error.message}</div>`;
+        });
+}

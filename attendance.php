@@ -45,7 +45,7 @@ if ($conn->connect_error) {
      */
     $now = date('Y-m-d H:i:s');
     $eventQuery = "SELECT event_id, event_name, event_type, start_time, end_time, location 
-                   FROM Event 
+                   FROM event 
                    WHERE start_time <= ? AND end_time >= ? 
                    LIMIT 1";
     $stmt = $conn->prepare($eventQuery);
@@ -81,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
          * VERIFY STUDENT EXISTS IN DATABASE
          * Checks the Student table to ensure the entered ID is valid
          */
-        $checkStudent = $conn->prepare("SELECT student_id FROM Student WHERE student_id = ?");
+        $checkStudent = $conn->prepare("SELECT student_id FROM student WHERE student_id = ?");
         $checkStudent->bind_param('i', $studentId);  // 'i' = integer parameter
         $checkStudent->execute();
         $studentResult = $checkStudent->get_result();
@@ -97,9 +97,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
              */
             $checkAttendance = $conn->prepare(
                 "SELECT attendance_id, start_scan_time, end_scan_time 
-                 FROM AttendsEventSessions 
-                 WHERE student_id = ? AND event_id = ?
-                 LIMIT 1"
+                 FROM attendance_session 
+                 WHERE student_id = ? AND event_id = ?"
             );
             $checkAttendance->bind_param('ii', $studentId, $activeEvent['event_id']);
             $checkAttendance->execute();
@@ -118,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
             if (!$attendance) {
                 // SCENARIO 1: First scan - create sign-in record
                 $insert = $conn->prepare(
-                    "INSERT INTO AttendsEventSessions (student_id, event_id, start_scan_time, source) 
+                    "INSERT INTO attendance_session (student_id, event_id, start_scan_time, source) 
                      VALUES (?, ?, ?, 'manual')"
                 );
                 $insert->bind_param('iis', $studentId, $activeEvent['event_id'], $now);
@@ -132,7 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
             } elseif ($attendance['start_scan_time'] && !$attendance['end_scan_time']) {
                 // SCENARIO 2: Second scan - record sign-out time
                 $update = $conn->prepare(
-                    "UPDATE AttendsEventSessions SET end_scan_time = ? WHERE attendance_id = ?"
+                    "UPDATE attendance_session SET end_scan_time = ? WHERE attendance_id = ?"
                 );
                 $update->bind_param('si', $now, $attendance['attendance_id']);
                 if ($update->execute()) {

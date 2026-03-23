@@ -59,8 +59,8 @@ if ($conn->connect_error) {
      * Retrieves the professor's name and email from Professor table
      * Uses prepared statement to prevent SQL injection
      */
-    $profQuery = $conn->prepare("SELECT professor_id, first_name, last_name, email FROM Professor WHERE professor_id = ?");
-    $profQuery->bind_param('i', $professorId);
+    $profQuery = $conn->prepare("SELECT prof_id, name, email FROM professor WHERE prof_id = ?");
+    $profQuery->bind_param('i', $professorId);  // 'i' = integer parameter
     $profQuery->execute();
     $professor = $profQuery->get_result()->fetch_assoc();
     $profQuery->close();
@@ -74,9 +74,9 @@ if ($conn->connect_error) {
         $courseQuery = $conn->prepare("
             SELECT c.course_id, c.course_name, c.course_code, c.section, c.semester, 
                    c.minimum_events_required,
-                   (SELECT COUNT(*) FROM EnrollmentInCourses e WHERE e.course_id = c.course_id AND e.status = 'active') as student_count
-            FROM Course c
-            JOIN CourseAssignment ca ON c.course_id = ca.course_id
+                   (SELECT COUNT(*) FROM enrollment e WHERE e.course_id = c.course_id AND e.status = 'active') as student_count
+            FROM course c
+            JOIN course_assignment ca ON c.course_id = ca.course_id
             WHERE ca.professor_id = ?
             ORDER BY c.course_code
         ");
@@ -91,7 +91,7 @@ if ($conn->connect_error) {
          */
         while ($course = $coursesResult->fetch_assoc()) {
             // Get total event count (in production, filter by course's permitted event types)
-            $eventCountQuery = $conn->query("SELECT COUNT(*) as count FROM Event");
+            $eventCountQuery = $conn->query("SELECT COUNT(*) as count FROM event");
             $eventCount = $eventCountQuery->fetch_assoc()['count'];
             $course['event_count'] = $eventCount;
             
@@ -104,7 +104,7 @@ if ($conn->connect_error) {
          * GET TOTAL EVENT COUNT
          * Counts all events in the Event table for dashboard statistics
          */
-        $eventQuery = $conn->query("SELECT COUNT(*) as total FROM Event");
+        $eventQuery = $conn->query("SELECT COUNT(*) as total FROM event");
         $totalEvents = $eventQuery->fetch_assoc()['total'];
     }
 
@@ -131,12 +131,12 @@ if ($conn->connect_error) {
              * Only includes actively enrolled students
              */
             $studentQuery = $conn->prepare("
-                SELECT s.student_id, s.first_name, s.last_name, s.email, s.year,
-                       (SELECT COUNT(*) FROM AttendsEventSessions a WHERE a.student_id = s.student_id AND a.end_scan_time IS NOT NULL) as events_attended
-                FROM Student s
-                JOIN EnrollmentInCourses e ON s.student_id = e.student_id
+                SELECT s.student_id, s.name, s.email, s.year,
+                       (SELECT COUNT(*) FROM attendance_session a WHERE a.student_id = s.student_id AND a.end_scan_time IS NOT NULL) as events_attended
+                FROM student s
+                JOIN enrollment e ON s.student_id = e.student_id
                 WHERE e.course_id = ? AND e.status = 'active'
-                ORDER BY s.last_name, s.first_name
+                ORDER BY s.name
             ");
             $studentQuery->bind_param('i', $selectedCourseId);
             $studentQuery->execute();

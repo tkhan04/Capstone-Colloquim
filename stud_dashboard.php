@@ -58,8 +58,8 @@ if ($conn->connect_error) {
      * Retrieves the student's name, email, and year from Student table
      * Uses prepared statement to prevent SQL injection
      */
-    $studentQuery = $conn->prepare("SELECT student_id, first_name, last_name, email, year FROM Student WHERE student_id = ?");
-    $studentQuery->bind_param('i', $studentId);
+    $studentQuery = $conn->prepare("SELECT student_id, name, email, year FROM student WHERE student_id = ?");
+    $studentQuery->bind_param('i', $studentId);  // 'i' = integer parameter
     $studentQuery->execute();
     $student = $studentQuery->get_result()->fetch_assoc();
     $studentQuery->close();
@@ -73,8 +73,8 @@ if ($conn->connect_error) {
          */
         $reqQuery = $conn->prepare("
             SELECT MAX(c.minimum_events_required) as min_req 
-            FROM Course c
-            JOIN EnrollmentInCourses e ON c.course_id = e.course_id
+            FROM course c
+            JOIN enrollment e ON c.course_id = e.course_id
             WHERE e.student_id = ? AND e.status = 'active'
         ");
         $reqQuery->bind_param('i', $studentId);
@@ -93,8 +93,8 @@ if ($conn->connect_error) {
          */
         $attendedQuery = $conn->prepare("
             SELECT COUNT(*) as count 
-            FROM student_event_attended 
-            WHERE student_id = ? IS NOT NULL
+            FROM attendance_session 
+            WHERE student_id = ? AND end_scan_time IS NOT NULL
         ");
         $attendedQuery->bind_param('i', $studentId);
         $attendedQuery->execute();
@@ -110,7 +110,7 @@ if ($conn->connect_error) {
         $now = date('Y-m-d H:i:s');
         $upcomingQuery = $conn->prepare("
             SELECT e.event_id, e.event_name, e.event_type, e.start_time, e.end_time, e.location
-            FROM Event e
+            FROM event e
             WHERE e.start_time > ?
             ORDER BY e.start_time ASC
             LIMIT 10
