@@ -1,24 +1,13 @@
 <?php
-/*
-$dbHost = '';
-$dbPort = '';
-$dbName = '';
-$dbUser = '';
-$dbPass = '';
-*/
 
-
-
+// Database configuration
 $dbConfigPath = __DIR__ . '/../secrets/db.php';
 if (!file_exists($dbConfigPath)) {
     $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
 }
 require $dbConfigPath;
-// refer to the creds in the commented line at the top and enter your local credentials
 
-/*
- above me is just the credentials for the database
-*/
+// Get user_id from request
 $userId = null;
 if (isset($_GET['user_id'])) {
     $userId = trim((string)$_GET['user_id']);
@@ -33,8 +22,9 @@ if (isset($_GET['user_id'])) {
     }
 }
 
-$conn = mysqli_init(); // Initialize the MySQLi connection
-if ($conn === false) { // if the connection fails then they will get an error message
+// Initialize MySQLi connection
+$conn = mysqli_init();
+if ($conn === false) {
     http_response_code(500);
     header('Content-Type: application/json');
     echo json_encode([
@@ -45,9 +35,10 @@ if ($conn === false) { // if the connection fails then they will get an error me
 }
 
 try {
-    $conn->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5); // Set the connection timeout to 5 seconds
-    $connected = @$conn->real_connect($dbHost, $dbUser, $dbPass, $dbName, $dbPort); // Attempt to connect to the database
-    if ($connected !== true) { //connection failed but connecting to db was successful, so your credentials are wrong
+    $conn->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+    $connected = @$conn->real_connect($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
+    
+    if ($connected !== true) {
         http_response_code(500);
         header('Content-Type: application/json');
         echo json_encode([
@@ -77,7 +68,6 @@ try {
         $stmt->close();
 
         if ($row !== null) {
-            // User exists: return success
             $uid = (int)$row['user_id'];
             $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
             $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -90,7 +80,6 @@ try {
             ]);
             exit;
         } else {
-            // User not found
             echo json_encode([
                 'ok' => true,
                 'exists' => false,
@@ -106,6 +95,6 @@ try {
         'database' => $dbName,
     ]);
 } finally {
-    $conn->close();//always close the connection
+    $conn->close();
 }
 ?>

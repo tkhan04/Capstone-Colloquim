@@ -60,7 +60,7 @@ if ($conn->connect_error) {
      * Uses prepared statement to prevent SQL injection
      */
     $profQuery = $conn->prepare("SELECT professor_id, first_name, last_name, email FROM Professor WHERE professor_id = ?");
-    $profQuery->bind_param('i', $professorId);  // 'i' = integer parameter
+    $profQuery->bind_param('i', $professorId);
     $profQuery->execute();
     $professor = $profQuery->get_result()->fetch_assoc();
     $profQuery->close();

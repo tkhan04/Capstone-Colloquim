@@ -1,4 +1,4 @@
-secrets/db.php
+secrets/
 .DS_Store
 TestFiles/.DS_Store
 TestFiles/uploads/
