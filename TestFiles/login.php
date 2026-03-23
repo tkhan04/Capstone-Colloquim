@@ -26,12 +26,13 @@ require $dbConfigPath;
  * DATABASE CONNECTION
  * Establishes connection to MySQL database
  */
-$conn = new mysqli($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
-
-if ($conn->connect_error) {
+try {
+    $pdo = new PDO("mysql:host=$dbHost;port=$dbPort;dbname=$dbName;charset=utf8mb4", $dbUser, $dbPass);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
     echo json_encode([
         'ok' => false,
-        'error' => 'Database connection failed: ' . $conn->connect_error
+        'error' => 'Database connection failed: ' . $e->getMessage()
     ]);
     exit;
 }
@@ -61,12 +62,9 @@ if (empty($email)) {
  * Queries AppUser table to find matching user
  * Returns user_id and role if found
  */
-$stmt = $conn->prepare("SELECT user_id, username, email, role FROM AppUser WHERE email = ? LIMIT 1");
-$stmt->bind_param('s', $email);
-$stmt->execute();
-$result = $stmt->get_result();
-$user = $result->fetch_assoc();
-$stmt->close();
+$stmt = $pdo->prepare("SELECT user_id, username, email, role FROM AppUser WHERE email = ? LIMIT 1");
+$stmt->execute([$email]);
+$user = $stmt->fetch(PDO::FETCH_ASSOC);
 
 // User not found
 if (!$user) {
@@ -92,12 +90,9 @@ switch ($user['role']) {
          * PROFESSOR LOGIN
          * Fetch professor_id from Professor table using user_id
          */
-        $profStmt = $conn->prepare("SELECT professor_id FROM Professor WHERE user_id = ?");
-        $profStmt->bind_param('i', $user['user_id']);
-        $profStmt->execute();
-        $profResult = $profStmt->get_result();
-        $professor = $profResult->fetch_assoc();
-        $profStmt->close();
+        $profStmt = $pdo->prepare("SELECT professor_id FROM Professor WHERE user_id = ?");
+        $profStmt->execute([$user['user_id']]);
+        $professor = $profStmt->fetch(PDO::FETCH_ASSOC);
         
         if ($professor) {
             $roleId = $professor['professor_id'];
@@ -116,12 +111,9 @@ switch ($user['role']) {
          * STUDENT LOGIN
          * Fetch student_id from Student table using user_id
          */
-        $stuStmt = $conn->prepare("SELECT student_id FROM Student WHERE user_id = ?");
-        $stuStmt->bind_param('i', $user['user_id']);
-        $stuStmt->execute();
-        $stuResult = $stuStmt->get_result();
-        $student = $stuResult->fetch_assoc();
-        $stuStmt->close();
+        $stuStmt = $pdo->prepare("SELECT student_id FROM Student WHERE user_id = ?");
+        $stuStmt->execute([$user['user_id']]);
+        $student = $stuStmt->fetch(PDO::FETCH_ASSOC);
         
         if ($student) {
             $roleId = $student['student_id'];
@@ -169,4 +161,3 @@ echo json_encode([
     'redirect' => $redirectUrl
 ]);
 
-$conn->close();

@@ -98,7 +98,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
             $checkAttendance = $conn->prepare(
                 "SELECT attendance_id, start_scan_time, end_scan_time 
                  FROM AttendsEventSessions 
-                 WHERE student_id = ? AND event_id = ?"
+                 WHERE student_id = ? AND event_id = ?
+                 LIMIT 1"
             );
             $checkAttendance->bind_param('ii', $studentId, $activeEvent['event_id']);
             $checkAttendance->execute();

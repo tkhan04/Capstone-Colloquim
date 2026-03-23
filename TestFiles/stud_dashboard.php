@@ -59,7 +59,7 @@ if ($conn->connect_error) {
      * Uses prepared statement to prevent SQL injection
      */
     $studentQuery = $conn->prepare("SELECT student_id, first_name, last_name, email, year FROM Student WHERE student_id = ?");
-    $studentQuery->bind_param('i', $studentId);  // 'i' = integer parameter
+    $studentQuery->bind_param('i', $studentId);
     $studentQuery->execute();
     $student = $studentQuery->get_result()->fetch_assoc();
     $studentQuery->close();
@@ -93,8 +93,8 @@ if ($conn->connect_error) {
          */
         $attendedQuery = $conn->prepare("
             SELECT COUNT(*) as count 
-            FROM AttendsEventSessions 
-            WHERE student_id = ? AND end_scan_time IS NOT NULL
+            FROM student_event_attended 
+            WHERE student_id = ? IS NOT NULL
         ");
         $attendedQuery->bind_param('i', $studentId);
         $attendedQuery->execute();
@@ -136,8 +136,8 @@ if ($conn->connect_error) {
         $historyQuery = $conn->prepare("
             SELECT e.event_id, e.event_name, e.event_type, e.start_time, e.end_time, e.location,
                    a.start_scan_time, a.end_scan_time, a.source
-            FROM AttendsEventSessions a
-            JOIN Event e ON a.event_id = e.event_id
+            FROM attendance_session a
+            JOIN event e ON a.event_id = e.event_id
             WHERE a.student_id = ?
             ORDER BY e.start_time DESC
         ");
