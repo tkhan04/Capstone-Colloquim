@@ -1,0 +1,7 @@
+secrets/db.php
+.DS_Store
+TestFiles/.DS_Store
+TestFiles/uploads/
+colloquium_db.sql
+TestFiles/gburglogo.jpg
+example_roster.csv
