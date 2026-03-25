@@ -20,10 +20,17 @@ require __DIR__ . '/db.php';
 
 $adminId         = (int)($_GET['admin_id'] ?? 1);
 $activeTab       = $_GET['tab']       ?? 'events';
-$selectedCourseId = (int)($_GET['course_id'] ?? 0);
+$selectedCourseId = trim($_GET['course_id'] ?? ''); // VARCHAR(20) - do not cast to int
 $message         = '';
 $messageType     = '';
 $dbError         = '';
+
+// Read flash message set by PRG redirect (upload, add, remove actions)
+if (!empty($_SESSION['flash_message'])) {
+    $message     = $_SESSION['flash_message'];
+    $messageType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_message'], $_SESSION['flash_type']);
+}
 
 // ── Helper: normalize CSV header to lowercase_snake_case ──────────────────────
 function normalizeCsvHeader($h) {
@@ -77,8 +84,10 @@ try {
                     "INSERT INTO Event (event_name, event_type, start_time, end_time, location, created_by)
                      VALUES (?, ?, ?, ?, ?, ?)"
                 )->execute([$name, $type, $startTime, $endTime, $location, $adminId]);
-                $message = 'Event created successfully!';
-                $messageType = 'success';
+                $_SESSION['flash_message'] = 'Event created successfully!';
+                $_SESSION['flash_type']    = 'success';
+                header("Location: ?admin_id={$adminId}&tab=events");
+                exit;
             }
         }
 
@@ -86,8 +95,10 @@ try {
         if ($action === 'delete_event') {
             $eid = (int)$_POST['event_id'];
             $pdo->prepare("DELETE FROM Event WHERE event_id = ?")->execute([$eid]);
-            $message = 'Event deleted.';
-            $messageType = 'success';
+            $_SESSION['flash_message'] = 'Event deleted.';
+            $_SESSION['flash_type']    = 'success';
+            header("Location: ?admin_id={$adminId}&tab=events");
+            exit;
         }
 
         // ── CREATE COURSE ───────────────────────────────────────────────────────
@@ -166,8 +177,10 @@ try {
                 $pdo->prepare(
                     "INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')"
                 )->execute([$studentId, $courseId]);
-                $message = 'Student added to roster.';
-                $messageType = 'success';
+                $_SESSION['flash_message'] = 'Student added to roster.';
+                $_SESSION['flash_type']    = 'success';
+                header("Location: ?admin_id={$adminId}&tab=rosters&course_id=" . urlencode($courseId));
+                exit;
             }
         }
 
@@ -175,8 +188,12 @@ try {
         if ($action === 'remove_from_roster') {
             $enrollId = (int)$_POST['enrollment_id'];
             $pdo->prepare("DELETE FROM EnrollmentInCourses WHERE enrollment_id = ?")->execute([$enrollId]);
-            $message = 'Student removed from roster.';
-            $messageType = 'success';
+            $_SESSION['flash_message'] = 'Student removed from roster.';
+            $_SESSION['flash_type']    = 'success';
+            // PRG redirect to keep course selected after remove
+            $cid = trim($_POST['course_id'] ?? '');
+            header("Location: ?admin_id={$adminId}&tab=rosters" . ($cid ? '&course_id=' . urlencode($cid) : ''));
+            exit;
         }
 
         // ── UPLOAD CSV ROSTER ───────────────────────────────────────────────────
@@ -191,7 +208,14 @@ try {
                 $message = 'Select a course before uploading a roster.';
                 $messageType = 'error';
             } elseif (!isset($_FILES['roster_csv']) || $_FILES['roster_csv']['error'] !== UPLOAD_ERR_OK) {
-                $message = 'File upload failed. Please try again.';
+                $uploadErr = $_FILES['roster_csv']['error'] ?? -1;
+                $errMsg = match((int)$uploadErr) {
+                    UPLOAD_ERR_NO_FILE  => 'No file was selected. Please choose a CSV file.',
+                    UPLOAD_ERR_INI_SIZE,
+                    UPLOAD_ERR_FORM_SIZE => 'File is too large.',
+                    default             => 'File upload failed (code ' . $uploadErr . '). Please try again.',
+                };
+                $message = $errMsg;
                 $messageType = 'error';
             } elseif (strtolower(pathinfo($_FILES['roster_csv']['name'], PATHINFO_EXTENSION)) !== 'csv') {
                 $message = 'Please upload a .csv file.';
@@ -301,15 +325,19 @@ try {
                 }
                 fclose($handle);
 
-                $message = "Upload complete: {$created} student(s) created, {$enrolled} enrolled, {$alreadyIn} already enrolled.";
-                if ($skipped) $message .= " {$skipped} row(s) skipped.";
-                $messageType = 'success';
+                // PRG: redirect back to GET URL so the course stays selected and refreshing won't re-POST
+                $msg = "Upload complete: {$created} student(s) created, {$enrolled} enrolled, {$alreadyIn} already enrolled.";
+                if ($skipped) $msg .= " {$skipped} row(s) skipped.";
+                $_SESSION['flash_message'] = $msg;
+                $_SESSION['flash_type']    = 'success';
+                header("Location: ?admin_id={$adminId}&tab=rosters&course_id=" . urlencode($courseId));
+                exit;
             }
         }
 
-        // Persist selected course across POST redirects
+        // For error cases, keep the course selected from POST data
         if (isset($_POST['course_id'])) {
-            $selectedCourseId = (int)$_POST['course_id'];
+            $selectedCourseId = trim($_POST['course_id']); // VARCHAR(20), not int
         }
     }
 
@@ -506,7 +534,7 @@ try {
                     <option value="">-- Choose a course --</option>
                     <?php foreach ($courses as $c): ?>
                     <option value="<?= htmlspecialchars($c['course_id']) ?>"
-                            <?= ($selectedCourseId && $selectedCourseId == $c['course_id']) ? 'selected' : '' ?>>
+                            <?= ($selectedCourseId !== '' && $selectedCourseId === $c['course_id']) ? 'selected' : '' ?>>
                         <?= htmlspecialchars($c['course_id'] . ' - ' . $c['course_name']) ?>
                     </option>
                     <?php endforeach; ?>
@@ -523,17 +551,23 @@ try {
                 <form method="POST" enctype="multipart/form-data" class="upload-form" id="rosterUploadForm">
                     <input type="hidden" name="action"    value="upload_roster_csv">
                     <input type="hidden" name="course_id" value="<?= $selectedCourseId ?>">
-                    <input type="file" name="roster_csv" id="rosterCsvInput" class="upload-input" accept=".csv" required>
+                    <!-- No 'required' here — the hidden input can't show browser validation UI -->
+                    <input type="file" name="roster_csv" id="rosterCsvInput" class="upload-input" accept=".csv">
                     <label for="rosterCsvInput" id="rosterDropzone" class="upload-dropzone">
                         <i class="fas fa-cloud-arrow-up"></i>
-                        <span>Drag & drop a CSV here, or click to choose</span>
+                        <span>Drag &amp; drop a CSV here, or click to choose</span>
                     </label>
                     <p class="upload-selected" id="uploadSelectedFile">No file selected.</p>
+                    <!-- Explicit submit button so the form always has a way to be submitted -->
+                    <button type="submit" class="btn-primary" id="uploadSubmitBtn" style="display:none;">
+                        <i class="fas fa-upload"></i> Upload Roster
+                    </button>
                 </form>
                 <p class="upload-hint">
-                    CSV columns: <strong>student_id, fname, lname, email, year</strong>
-                    (or first_name / last_name / name). New students are created automatically
-                    with a temporary password of <code>changeme123</code>.
+                    CSV columns: Please enter this format in the CSV StudentID, First Name, Last Name, 
+                    Email, Year.
+                    Thank you :)
+                    ALSO: All new students have the passowrd: password123, which they should be advised to change ASAP.
                 </p>
             </div>
 
@@ -575,6 +609,7 @@ try {
                                 <form method="POST" class="inline" onsubmit="return confirm('Remove this student?');">
                                     <input type="hidden" name="action"        value="remove_from_roster">
                                     <input type="hidden" name="enrollment_id" value="<?= $en['enrollment_id'] ?>">
+                                    <input type="hidden" name="course_id"     value="<?= htmlspecialchars($selectedCourseId) ?>">
                                     <button type="submit" class="btn-delete-small"><i class="fas fa-times"></i></button>
                                 </form>
                             </td>
@@ -732,29 +767,55 @@ try {
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
     window.onclick = e => { if (e.target.classList.contains('modal')) e.target.classList.remove('active'); };
 
-    // CSV drag-and-drop auto-submit
+    // CSV roster upload: show submit button when a file is selected
     (function() {
-        const form      = document.getElementById('rosterUploadForm');
-        const input     = document.getElementById('rosterCsvInput');
-        const dropzone  = document.getElementById('rosterDropzone');
-        const label     = document.getElementById('uploadSelectedFile');
+        const form       = document.getElementById('rosterUploadForm');
+        const input      = document.getElementById('rosterCsvInput');
+        const dropzone   = document.getElementById('rosterDropzone');
+        const label      = document.getElementById('uploadSelectedFile');
+        const submitBtn  = document.getElementById('uploadSubmitBtn');
         if (!form) return;
 
-        function submit(files) {
+        // When a file is chosen, update label and reveal the submit button
+        function fileSelected(files) {
             if (!files || !files.length) return;
-            label.textContent = 'Uploading: ' + files[0].name + ' …';
-            form.submit();
+            const name = files[0].name;
+            label.textContent = 'Selected: ' + name;
+            submitBtn.style.display = 'flex'; // show Upload button
         }
 
-        input.addEventListener('change', () => submit(input.files));
+        input.addEventListener('change', function() {
+            fileSelected(input.files);
+        });
 
-        dropzone.addEventListener('dragover',  e => { e.preventDefault(); dropzone.classList.add('is-dragover'); });
-        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('is-dragover'));
-        dropzone.addEventListener('drop', e => {
+        // Validate before submit: make sure a file was actually chosen
+        form.addEventListener('submit', function(e) {
+            if (!input.files || !input.files.length) {
+                e.preventDefault();
+                label.textContent = 'Please choose a CSV file first.';
+                label.style.color = '#dc3545';
+                return;
+            }
+            submitBtn.textContent = 'Uploading…';
+            submitBtn.disabled = true;
+        });
+
+        // Drag and drop support
+        dropzone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            dropzone.classList.add('is-dragover');
+        });
+        dropzone.addEventListener('dragleave', function() {
+            dropzone.classList.remove('is-dragover');
+        });
+        dropzone.addEventListener('drop', function(e) {
             e.preventDefault();
             dropzone.classList.remove('is-dragover');
-            input.files = e.dataTransfer.files;
-            submit(e.dataTransfer.files);
+            if (e.dataTransfer && e.dataTransfer.files.length) {
+                // Assign dropped files to the input
+                input.files = e.dataTransfer.files;
+                fileSelected(e.dataTransfer.files);
+            }
         });
     })();
     </script>

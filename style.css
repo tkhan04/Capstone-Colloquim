@@ -801,7 +801,8 @@ button[type='submit']:hover {
     color: #333;
 }
 
-input[type='email'] {
+input[type='email'],
+input[type='password'] {
     padding: 0.875rem 1rem;
     border: 1px solid #ccc;
     border-radius: 8px;
@@ -811,7 +812,8 @@ input[type='email'] {
     width: 100%;
 }
 
-input[type='email']:focus {
+input[type='email']:focus,
+input[type='password']:focus {
     outline: none;
     border-color: #ff6600;
     box-shadow: 0 0 0 3px rgba(255, 102, 0, 0.1);
