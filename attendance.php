@@ -1,154 +1,109 @@
 <?php
 /**
- * ATTENDANCE.PHP - Colloquium Event Attendance Sign-In/Out Page
- * 
- * This file handles the attendance tracking for colloquium events.
- * Students can sign in at the start of an event and sign out at the end.
- * The system automatically detects active events and records timestamps.
- * 
- * Database Tables Used:
- * - Event: To find currently active events
- * - Student: To validate student IDs
- * - AttendsEventSessions: To record sign-in/sign-out timestamps
+ * ATTENDANCE.PHP - Manual student check-in / check-out page
+ *
+ * A student walks up, enters their 7-digit Gettysburg ID (or scans their
+ * physical card — the scanner types the ID into the field automatically).
+ * The system finds the active event and records start_scan_time on first
+ * entry and end_scan_time on second entry.
+ *
+ * DB tables used (matches provided schema exactly):
+ *   Event(event_id, event_name, event_type, start_time, end_time, location)
+ *   Student(student_id)
+ *   AttendsEventSessions(student_id PK, event_id PK, start_scan_time,
+ *                        end_scan_time, minutes_present [generated], audit_note,
+ *                        overridden_by)
  */
 
-$dbConfigPath = __DIR__ . '/../secrets/db.php';
-if (!file_exists($dbConfigPath)) {
-    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
-}
-require $dbConfigPath;
+require __DIR__ . '/db.php';
 
-/**
- * DATABASE CONNECTION
- * Establishes connection to MySQL database using credentials from db.php
- * Parameters: $dbHost, $dbUser, $dbPass, $dbName, $dbPort (from secrets/db.php)
- */
-$conn = new mysqli($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
-$dbError = null;      // Stores any database connection errors
-$activeEvent = null;  // Stores the currently active event (if any)
-$message = '';        // Feedback message to display to user
-$messageType = '';    // Type of message: 'success', 'error', or 'info'
+$dbError     = null;
+$activeEvent = null;
+$message     = '';
+$messageType = '';
 
-/**
- * CHECK DATABASE CONNECTION
- * If connection fails, store error message for display
- * If successful, query for any currently active event
- */
-if ($conn->connect_error) {
-    $dbError = "Database connection failed: " . $conn->connect_error;
-} else {
-    /**
-     * FETCH ACTIVE EVENT
-     * Queries the Event table to find any event currently in progress
-     * An event is "active" if current time is between start_time and end_time
-     * Uses prepared statements to prevent SQL injection
-     */
-    $now = date('Y-m-d H:i:s');
-    $eventQuery = "SELECT event_id, event_name, event_type, start_time, end_time, location 
-                   FROM event 
-                   WHERE start_time <= ? AND end_time >= ? 
-                   LIMIT 1";
-    $stmt = $conn->prepare($eventQuery);
-    $stmt->bind_param('ss', $now, $now);  // 'ss' = two string parameters
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $activeEvent = $result->fetch_assoc();  // Returns null if no active event
-    $stmt->close();
+try {
+    $pdo = getDB();
+
+    // Find any event currently in progress (now between start_time and end_time)
+    $now  = date('Y-m-d H:i:s');
+    $stmt = $pdo->prepare(
+        "SELECT event_id, event_name, event_type, start_time, end_time, location
+         FROM Event
+         WHERE start_time <= ? AND end_time >= ?
+         LIMIT 1"
+    );
+    $stmt->execute([$now, $now]);
+    $activeEvent = $stmt->fetch();
+
+} catch (PDOException $e) {
+    $dbError = 'Database connection failed: ' . $e->getMessage();
 }
 
-/**
- * HANDLE FORM SUBMISSION (POST REQUEST)
- * Processes the sign-in/sign-out form when submitted
- * Only processes if no database error exists
- */
+// Handle sign-in/out form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
-    // Sanitize and retrieve student ID from form
     $studentId = trim($_POST['student_id'] ?? '');
-    
-    /**
-     * VALIDATION CHECKS
-     * 1. Check if student ID is provided
-     * 2. Check if there's an active event to sign into
-     */
-    if (empty($studentId)) {
-        $message = "Please enter a valid Student ID.";
-        $messageType = "error";
+
+    if ($studentId === '') {
+        $message     = 'Please enter your Student ID.';
+        $messageType = 'error';
     } elseif (!$activeEvent) {
-        $message = "No active event to sign in/out.";
-        $messageType = "error";
+        $message     = 'No active event right now. Check back when an event is in progress.';
+        $messageType = 'error';
     } else {
-        /**
-         * VERIFY STUDENT EXISTS IN DATABASE
-         * Checks the Student table to ensure the entered ID is valid
-         */
-        $checkStudent = $conn->prepare("SELECT student_id FROM student WHERE student_id = ?");
-        $checkStudent->bind_param('i', $studentId);  // 'i' = integer parameter
-        $checkStudent->execute();
-        $studentResult = $checkStudent->get_result();
-        
-        if ($studentResult->num_rows === 0) {
-            $message = "Student ID not found in system.";
-            $messageType = "error";
-        } else {
-            /**
-             * CHECK EXISTING ATTENDANCE RECORD
-             * Looks up if this student already has an attendance record for the active event
-             * This determines whether to create new record, update with sign-out, or reject
-             */
-            $checkAttendance = $conn->prepare(
-                "SELECT attendance_id, start_scan_time, end_scan_time 
-                 FROM attendance_session 
-                 WHERE student_id = ? AND event_id = ?"
-            );
-            $checkAttendance->bind_param('ii', $studentId, $activeEvent['event_id']);
-            $checkAttendance->execute();
-            $attendanceResult = $checkAttendance->get_result();
-            $attendance = $attendanceResult->fetch_assoc();
-            
-            $now = date('Y-m-d H:i:s');
-            
-            /**
-             * ATTENDANCE LOGIC - Three possible scenarios:
-             * 
-             * 1. NO RECORD EXISTS: Create new attendance record (sign-in)
-             * 2. HAS SIGN-IN BUT NO SIGN-OUT: Update record with sign-out time
-             * 3. BOTH TIMES RECORDED: Student already completed attendance
-             */
-            if (!$attendance) {
-                // SCENARIO 1: First scan - create sign-in record
-                $insert = $conn->prepare(
-                    "INSERT INTO attendance_session (student_id, event_id, start_scan_time, source) 
-                     VALUES (?, ?, ?, 'manual')"
-                );
-                $insert->bind_param('iis', $studentId, $activeEvent['event_id'], $now);
-                if ($insert->execute()) {
-                    $message = "Successfully signed IN at " . date('g:i A');
-                    $messageType = "success";
-                } else {
-                    $message = "Error recording attendance.";
-                    $messageType = "error";
-                }
-            } elseif ($attendance['start_scan_time'] && !$attendance['end_scan_time']) {
-                // SCENARIO 2: Second scan - record sign-out time
-                $update = $conn->prepare(
-                    "UPDATE attendance_session SET end_scan_time = ? WHERE attendance_id = ?"
-                );
-                $update->bind_param('si', $now, $attendance['attendance_id']);
-                if ($update->execute()) {
-                    $message = "Successfully signed OUT at " . date('g:i A');
-                    $messageType = "success";
-                } else {
-                    $message = "Error recording sign-out.";
-                    $messageType = "error";
-                }
+        try {
+            $pdo = getDB();
+
+            // Verify the student exists in the Student table
+            $check = $pdo->prepare("SELECT student_id FROM Student WHERE student_id = ? LIMIT 1");
+            $check->execute([$studentId]);
+
+            if (!$check->fetch()) {
+                $message     = 'Student ID not found. Please check your ID or contact a professor.';
+                $messageType = 'error';
             } else {
-                // SCENARIO 3: Already completed - inform user
-                $message = "You have already signed in and out for this event.";
-                $messageType = "info";
+                $eventId = $activeEvent['event_id'];
+
+                // Check for existing attendance record (composite PK: student_id + event_id)
+                $existing = $pdo->prepare(
+                    "SELECT start_scan_time, end_scan_time
+                     FROM AttendsEventSessions
+                     WHERE student_id = ? AND event_id = ?"
+                );
+                $existing->execute([$studentId, $eventId]);
+                $record = $existing->fetch();
+
+                $now = date('Y-m-d H:i:s');
+
+                if (!$record) {
+                    // First scan: insert sign-in record
+                    $pdo->prepare(
+                        "INSERT INTO AttendsEventSessions (student_id, event_id, start_scan_time)
+                         VALUES (?, ?, ?)"
+                    )->execute([$studentId, $eventId, $now]);
+                    $message     = 'Signed IN at ' . date('g:i A') . '. Come back at the end to sign out!';
+                    $messageType = 'success';
+
+                } elseif ($record['start_scan_time'] && !$record['end_scan_time']) {
+                    // Second scan: record sign-out time
+                    $pdo->prepare(
+                        "UPDATE AttendsEventSessions
+                         SET end_scan_time = ?
+                         WHERE student_id = ? AND event_id = ?"
+                    )->execute([$now, $studentId, $eventId]);
+                    $message     = 'Signed OUT at ' . date('g:i A') . '. Attendance recorded — thank you!';
+                    $messageType = 'success';
+
+                } else {
+                    // Both timestamps already present
+                    $message     = 'You have already completed check-in and check-out for this event.';
+                    $messageType = 'info';
+                }
             }
-            $checkAttendance->close();
+        } catch (PDOException $e) {
+            $message     = 'Database error: ' . $e->getMessage();
+            $messageType = 'error';
         }
-        $checkStudent->close();
     }
 }
 ?>
@@ -165,51 +120,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
     <div class="attendance-container">
         <header class="attendance-header">
             <h1><i class="fas fa-calendar-check"></i> Colloquium Attendance</h1>
-            <p class="subtitle">Scan or enter your student ID to sign in/out</p>
+            <p class="subtitle">Scan or enter your student ID to check in/out</p>
         </header>
 
-        <div class="active-event-banner <?php echo $activeEvent ? 'event-active' : 'no-event'; ?>">
-            <i class="fas <?php echo $activeEvent ? 'fa-broadcast-tower' : 'fa-exclamation-circle'; ?>"></i>
-            <span>Active event: <?php echo $activeEvent ? htmlspecialchars($activeEvent['event_name']) : 'None detected'; ?></span>
+        <!-- Active event banner -->
+        <div class="active-event-banner <?= $activeEvent ? 'event-active' : 'no-event' ?>">
+            <i class="fas <?= $activeEvent ? 'fa-broadcast-tower' : 'fa-exclamation-circle' ?>"></i>
+            <span>
+                <?= $activeEvent
+                    ? 'Active event: ' . htmlspecialchars($activeEvent['event_name'])
+                    : 'No active event detected' ?>
+            </span>
         </div>
 
+        <!-- Feedback message -->
         <?php if ($message): ?>
-        <div class="message <?php echo $messageType; ?>">
-            <i class="fas <?php 
-                echo $messageType === 'success' ? 'fa-check-circle' : 
-                    ($messageType === 'error' ? 'fa-times-circle' : 'fa-info-circle'); 
-            ?>"></i>
-            <?php echo htmlspecialchars($message); ?>
+        <div class="message <?= $messageType ?>">
+            <i class="fas <?= $messageType === 'success' ? 'fa-check-circle' : ($messageType === 'error' ? 'fa-times-circle' : 'fa-info-circle') ?>"></i>
+            <?= htmlspecialchars($message) ?>
         </div>
         <?php endif; ?>
 
+        <!-- Check-in form: student types or scanner types their 7-digit ID -->
         <form method="POST" class="attendance-form">
             <div class="input-group">
                 <label for="student_id">Student ID</label>
-                <input type="text" id="student_id" name="student_id" 
-                       placeholder="Scan your ID card or type manually" 
-                       autofocus required>
+                <input type="text" id="student_id" name="student_id"
+                       placeholder="Scan your ID card or type manually"
+                       autofocus required autocomplete="off"
+                       inputmode="numeric" pattern="\d{6,8}">
             </div>
             <button type="submit" class="btn-primary">
-                <i class="fas fa-sign-in-alt"></i> Sign In/Out
+                <i class="fas fa-sign-in-alt"></i> Check In / Check Out
             </button>
-            <p class="help-text">This records start/end timestamps in attendance system.</p>
+            <p class="help-text">Use this page at the start <em>and</em> end of the event.</p>
         </form>
 
         <?php if ($dbError): ?>
-        <div class="db-error">
-            <i class="fas fa-database"></i>
-            <?php echo htmlspecialchars($dbError); ?>
-        </div>
+        <div class="db-error"><i class="fas fa-database"></i> <?= htmlspecialchars($dbError) ?></div>
         <?php endif; ?>
 
+        <!-- Show current event details when one is active -->
         <?php if ($activeEvent): ?>
         <div class="event-details">
-            <h3><?php echo htmlspecialchars($activeEvent['event_name']); ?></h3>
-            <p><i class="fas fa-tag"></i> <?php echo htmlspecialchars($activeEvent['event_type']); ?></p>
-            <p><i class="fas fa-clock"></i> <?php echo date('g:i A', strtotime($activeEvent['start_time'])); ?> - <?php echo date('g:i A', strtotime($activeEvent['end_time'])); ?></p>
+            <h3><?= htmlspecialchars($activeEvent['event_name']) ?></h3>
+            <p><i class="fas fa-tag"></i> <?= htmlspecialchars($activeEvent['event_type']) ?></p>
+            <p><i class="fas fa-clock"></i>
+               <?= date('g:i A', strtotime($activeEvent['start_time'])) ?> –
+               <?= date('g:i A', strtotime($activeEvent['end_time'])) ?>
+            </p>
             <?php if ($activeEvent['location']): ?>
-            <p><i class="fas fa-map-marker-alt"></i> <?php echo htmlspecialchars($activeEvent['location']); ?></p>
+            <p><i class="fas fa-map-marker-alt"></i> <?= htmlspecialchars($activeEvent['location']) ?></p>
             <?php endif; ?>
         </div>
         <?php endif; ?>

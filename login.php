@@ -1,167 +1,99 @@
 <?php
-ini_set('display_errors', 1);
-ini_set('log_errors', 1);
-ini_set('error_log', __DIR__ . '/php_errors.log');
-error_reporting(E_ALL);
 /**
- * LOGIN.PHP - Authentication Handler for Colloquium System
- * 
- * This file handles user authentication by email address.
- * It checks the AppUser table for the email and returns the user's role.
- * Based on role, the frontend redirects to the appropriate dashboard:
- * - professor -> prof_dashboard.php
- * - student -> stud_dashboard.php  
- * - admin -> admin_dashboard.php
- * 
- * Database Tables Used:
- * - AppUser: To verify email and get user role
- * - Professor: To get professor_id for professor users
- * - Student: To get student_id for student users
+ * LOGIN.PHP - Authentication handler
+ *
+ * Accepts: GET ?email=...&password=...
+ * Checks AppUser table (email + password_hash).
+ * Returns JSON: { ok, redirect, user } on success
+ *               { ok, error } on failure
+ *
+ * DB columns used (matches provided schema):
+ *   AppUser: user_id, fname, lname, email, role, password_hash, is_active
+ *   Professor: professor_id (= user_id FK)
+ *   Student:   student_id  (= user_id FK)
  */
 
 header('Content-Type: application/json');
-$dbConfigPath = __DIR__ . '/../secrets/db.php';
-if (!file_exists($dbConfigPath)) {
-    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
-}
-require $dbConfigPath;
+ini_set('display_errors', 0); // hide PHP errors from JSON output
 
-/**
- * DATABASE CONNECTION
- * Establishes connection to MySQL database
- */
+// Load DB helper
+require __DIR__ . '/db.php';
+
+// Read credentials from GET (matches existing app.js approach)
+$email    = trim($_GET['email']    ?? $_POST['email']    ?? '');
+$password =      $_GET['password'] ?? $_POST['password'] ?? '';
+
+if ($email === '' || $password === '') {
+    echo json_encode(['ok' => false, 'error' => 'Email and password are required.']);
+    exit;
+}
+
 try {
-    $pdo = new PDO("mysql:host=$dbHost;port=$dbPort;dbname=$dbName;charset=utf8mb4", $dbUser, $dbPass);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch (PDOException $e) {
-    echo json_encode([
-        'ok' => false,
-        'error' => 'Database connection failed: ' . $e->getMessage()
-    ]);
-    exit;
-}
+    $pdo = getDB();
 
-/**
- * GET EMAIL FROM REQUEST
- * Accepts both GET and POST requests
- */
-$email = null;
-if (isset($_GET['email'])) {
-    $email = trim($_GET['email']);
-} elseif (isset($_POST['email'])) {
-    $email = trim($_POST['email']);
-}
+    // Fetch user by email from AppUser
+    $stmt = $pdo->prepare(
+        "SELECT user_id, fname, lname, email, role, password_hash, is_active
+         FROM AppUser WHERE email = ? LIMIT 1"
+    );
+    $stmt->execute([$email]);
+    $user = $stmt->fetch();
 
-// Validate email is provided
-if (empty($email)) {
-    echo json_encode([
-        'ok' => false,
-        'error' => 'Email is required'
-    ]);
-    exit;
-}
-
-/**
- * LOOK UP USER BY EMAIL
- * Queries AppUser table to find matching user
- * Returns user_id and role if found
- */
-$stmt = $pdo->prepare("SELECT user_id, display_name, email, role FROM app_user WHERE email = ? LIMIT 1");
-$stmt->execute([$email]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-// User not found
-if (!$user) {
-    echo json_encode([
-        'ok' => true,
-        'exists' => false,
-        'error' => 'Email not found in system'
-    ]);
-    exit;
-}
-
-/**
- * GET ROLE-SPECIFIC ID
- * Based on user role, fetch the corresponding ID from Professor/Student table
- * This ID is used in the dashboard URLs
- */
-$roleId = null;
-$redirectUrl = null;
-
-switch ($user['role']) {
-    case 'professor':
-        /**
-         * PROFESSOR LOGIN
-         * Fetch professor_id from Professor table using user_id
-         */
-        $profStmt = $pdo->prepare("SELECT prof_id FROM professor WHERE user_id = ?");
-        $profStmt->execute([$user['user_id']]);
-        $professor = $profStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($professor) {
-            $roleId = $professor['prof_id'];
-            $redirectUrl = "prof_dashboard.php?prof_id=" . $roleId;
-        } else {
-            echo json_encode([
-                'ok' => false,
-                'error' => 'Professor profile not found'
-            ]);
-            exit;
-        }
-        break;
-        
-    case 'student':
-        /**
-         * STUDENT LOGIN
-         * Fetch student_id from Student table using user_id
-         */
-        $stuStmt = $pdo->prepare("SELECT student_id FROM student WHERE user_id = ?");
-        $stuStmt->execute([$user['user_id']]);
-        $student = $stuStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($student) {
-            $roleId = $student['student_id'];
-            $redirectUrl = "stud_dashboard.php?student_id=" . $roleId . "&tab=upcoming";
-        } else {
-            echo json_encode([
-                'ok' => false,
-                'error' => 'Student profile not found'
-            ]);
-            exit;
-        }
-        break;
-        
-    case 'admin':
-        /**
-         * ADMIN LOGIN
-         * Admins use their user_id directly
-         */
-        $roleId = $user['user_id'];
-        $redirectUrl = "admin_dashboard.php?admin_id=" . $roleId;
-        break;
-        
-    default:
-        echo json_encode([
-            'ok' => false,
-            'error' => 'Unknown user role'
-        ]);
+    if (!$user) {
+        echo json_encode(['ok' => false, 'error' => 'Email not found in system.']);
         exit;
+    }
+
+    // Verify password (supports both hashed passwords and plain-text fallback for dev)
+    $hashOk = password_verify($password, $user['password_hash'])
+           || $password === $user['password_hash']; // plain-text fallback for dev seeds
+
+    if (!$hashOk) {
+        echo json_encode(['ok' => false, 'error' => 'Incorrect password.']);
+        exit;
+    }
+
+    if (!(int)$user['is_active']) {
+        echo json_encode(['ok' => false, 'error' => 'Account is inactive. Contact administrator.']);
+        exit;
+    }
+
+    // Build redirect based on role
+    $userId   = (int)$user['user_id'];
+    $redirect = '';
+
+    switch ($user['role']) {
+        case 'professor':
+            // professor_id = user_id (FK in Professor table)
+            $redirect = "prof_dashboard.php?prof_id={$userId}";
+            break;
+
+        case 'student':
+            // student_id = user_id (FK in Student table)
+            $redirect = "stud_dashboard.php?student_id={$userId}&tab=upcoming";
+            break;
+
+        case 'admin':
+            $redirect = "admin_dashboard.php?admin_id={$userId}";
+            break;
+
+        default:
+            echo json_encode(['ok' => false, 'error' => 'Unknown role.']);
+            exit;
+    }
+
+    echo json_encode([
+        'ok'       => true,
+        'redirect' => $redirect,
+        'user'     => [
+            'user_id' => $userId,
+            'fname'   => $user['fname'],
+            'lname'   => $user['lname'],
+            'email'   => $user['email'],
+            'role'    => $user['role'],
+        ],
+    ]);
+
+} catch (PDOException $e) {
+    echo json_encode(['ok' => false, 'error' => 'Database error: ' . $e->getMessage()]);
 }
-
-/**
- * RETURN SUCCESS RESPONSE
- * Includes user info and redirect URL for frontend
- */
-echo json_encode([
-    'ok' => true,
-    'exists' => true,
-    'user' => [
-        'user_id' => $user['user_id'],
-        'username' => $user['display_name'],
-        'email' => $user['email'],
-        'role' => $user['role'],
-        'role_id' => $roleId
-    ],
-    'redirect' => $redirectUrl
-]);
-

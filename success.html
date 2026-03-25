@@ -1,23 +1,11 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
-    <title>Login Success</title>
+    <meta charset="UTF-8">
+    <title>Redirecting...</title>
+    <meta http-equiv="refresh" content="0; url=index.html">
 </head>
-
 <body>
-    <h1>Login Successful</h1>
-    <p id="welcomeMessage"></p>
-    <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const userId = urlParams.get('user_id');
-        const welcomeDiv = document.getElementById('welcomeMessage');
-        if (userId) {
-            welcomeDiv.textContent = `Welcome, User ID: ${userId}`;
-        } else {
-            welcomeDiv.textContent = 'Welcome!';
-        }
-    </script>
+    <p>Redirecting... <a href="index.html">Click here</a> if not redirected.</p>
 </body>
-
 </html>

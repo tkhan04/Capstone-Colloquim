@@ -1,111 +1,55 @@
 <?php
-/*
-$dbHost = '';
-$dbPort = '';
-$dbName = '';
-$dbUser = '';
-$dbPass = '';
-*/
+/**
+ * BACKEND.PHP - Legacy connection-test / user-lookup endpoint
+ * Kept for compatibility with any existing tests.
+ * Uses AppUser table with correct schema columns.
+ */
 
-
-
-$dbConfigPath = __DIR__ . '/../secrets/db.php';
-if (!file_exists($dbConfigPath)) {
-    $dbConfigPath = __DIR__ . '/../secrets/db.php.example';
-}
-require $dbConfigPath;
-// refer to the creds in the commented line at the top and enter your local credentials
-
-/*
- above me is just the credentials for the database
-*/
-$userId = null;
-if (isset($_GET['user_id'])) {
-    $userId = trim((string)$_GET['user_id']);
-    if ($userId === '') {
-        http_response_code(400);
-        header('Content-Type: application/json');
-        echo json_encode([
-            'ok' => false,
-            'error' => 'Missing user_id',
-        ]);
-        exit;
-    }
-}
-
-$conn = mysqli_init(); // Initialize the MySQLi connection
-if ($conn === false) { // if the connection fails then they will get an error message
-    http_response_code(500);
-    header('Content-Type: application/json');
-    echo json_encode([
-        'ok' => false,
-        'error' => 'Failed to initialize MySQL',
-    ]);
-    exit;
-}
+header('Content-Type: application/json');
+require __DIR__ . '/db.php';
 
 try {
-    $conn->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5); // Set the connection timeout to 5 seconds
-    $connected = @$conn->real_connect($dbHost, $dbUser, $dbPass, $dbName, $dbPort); // Attempt to connect to the database
-    if ($connected !== true) { //connection failed but connecting to db was successful, so your credentials are wrong
-        http_response_code(500);
-        header('Content-Type: application/json');
+    $pdo = getDB();
+
+    // Optional: look up a user by user_id
+    if (isset($_GET['user_id'])) {
+        $uid  = (int)$_GET['user_id'];
+        $stmt = $pdo->prepare("SELECT user_id, email FROM AppUser WHERE user_id = ? LIMIT 1");
+        $stmt->execute([$uid]);
+        $row  = $stmt->fetch();
+
         echo json_encode([
-            'ok' => false,
-            'error' => $conn->connect_error ?: 'Unknown MySQL connection error',
+            'ok'     => true,
+            'exists' => (bool)$row,
+            'user_id' => $row ? (int)$row['user_id'] : null,
         ]);
         exit;
     }
 
-    header('Content-Type: application/json');
+    // Optional: look up professor by email
+    if (isset($_GET['prof_email'])) {
+        $email = trim($_GET['prof_email']);
+        $stmt  = $pdo->prepare(
+            "SELECT p.professor_id FROM Professor p WHERE p.email = ? LIMIT 1"
+        );
+        $stmt->execute([$email]);
+        $row = $stmt->fetch();
 
-    if ($userId !== null) {
-        $stmt = $conn->prepare('SELECT user_id, email FROM app_user WHERE user_id = ? LIMIT 1');
-        if ($stmt === false) {
-            http_response_code(500);
-            echo json_encode([
-                'ok' => false,
-                'error' => 'Failed to prepare statement',
-            ]);
-            exit;
-        }
-
-        $stmt->bind_param('i', $userId);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        $row = $res ? $res->fetch_assoc() : null;
-        $stmt->close();
-
-        if ($row !== null) {
-            // User exists: return success
-            $uid = (int)$row['user_id'];
-            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-            $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-            $successLink = $scheme . '://' . $host . '/success.html?user_id=' . urlencode($uid);
-            echo json_encode([
-                'ok' => true,
-                'exists' => true,
-                'user_id' => $uid,
-                'link' => $successLink,
-            ]);
-            exit;
-        } else {
-            // User not found
-            echo json_encode([
-                'ok' => true,
-                'exists' => false,
-                'user_id' => null,
-            ]);
-            exit;
-        }
+        echo json_encode([
+            'ok'      => true,
+            'exists'  => (bool)$row,
+            'prof_id' => $row ? (int)$row['professor_id'] : null,
+        ]);
+        exit;
     }
 
+    // Default: connection test
     echo json_encode([
-        'ok' => true,
-        'message' => 'Connected to MySQL successfully',
-        'database' => $dbName,
+        'ok'       => true,
+        'message'  => 'Connected to MySQL successfully',
+        'database' => DB_NAME ?? 'colloquium',
     ]);
-} finally {
-    $conn->close();//always close the connection
+
+} catch (PDOException $e) {
+    echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
 }
-?>
