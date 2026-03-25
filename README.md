@@ -95,6 +95,12 @@ php -S localhost:8000
 
 Then open [http://localhost:8000](http://localhost:8000) in your browser.
 
+IF YOU WANT TO DO IT LOCALLY ^
+
+It's also available at https://cs.gettysburg.edu/~khanta01/cs440/TestFiles/
+
+This is publiclly available, and the URL will change to a different path/
+
 ## Contributing
 
 1. Fork the repository and create a feature branch.
