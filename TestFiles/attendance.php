@@ -15,7 +15,7 @@
  *                        overridden_by)
  */
 
-require __DIR__ . '/db.php';
+ require __DIR__ . '/../secrets/db.php';
 
 $dbError     = null;
 $activeEvent = null;

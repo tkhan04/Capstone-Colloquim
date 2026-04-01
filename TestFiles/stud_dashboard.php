@@ -15,8 +15,8 @@
  */
 
 session_start();
-require __DIR__ . '/db.php';
-
+require __DIR__ . '/../secrets/db.php';
+    
 $studentId = (int)($_GET['student_id'] ?? 1);
 $activeTab = $_GET['tab'] ?? 'upcoming';
 $dbError   = '';

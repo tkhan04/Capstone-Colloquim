@@ -16,8 +16,7 @@
 
 session_start();
 
-require __DIR__ . '/db.php';
-
+require __DIR__ . '/../secrets/db.php';
 $adminId         = (int)($_GET['admin_id'] ?? 1);
 $activeTab       = $_GET['tab']       ?? 'events';
 $selectedCourseId = trim($_GET['course_id'] ?? ''); // VARCHAR(20) - do not cast to int

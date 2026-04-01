@@ -11,7 +11,7 @@
  * user_id is supplied by the user (their Gettysburg 7-digit ID).
  */
 
-require __DIR__ . '/db.php';
+ require __DIR__ . '/../secrets/db.php';
 
 $error   = '';
 $success = '';

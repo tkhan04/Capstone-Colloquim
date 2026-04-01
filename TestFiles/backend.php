@@ -6,7 +6,7 @@
  */
 
 header('Content-Type: application/json');
-require __DIR__ . '/db.php';
+require __DIR__ . '/../secrets/db.php';
 
 try {
     $pdo = getDB();

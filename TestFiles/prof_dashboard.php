@@ -17,7 +17,7 @@
  */
 
 session_start();
-require __DIR__ . '/db.php';
+require __DIR__ . '/../secrets/db.php';
 
 $profId          = (int)($_GET['prof_id']   ?? 1);
 $selectedCourseId = trim($_GET['course_id'] ?? '');

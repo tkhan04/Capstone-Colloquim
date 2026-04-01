@@ -17,7 +17,7 @@ header('Content-Type: application/json');
 ini_set('display_errors', 0); // hide PHP errors from JSON output
 
 // Load DB helper
-require __DIR__ . '/db.php';
+require __DIR__ . '/../secrets/db.php';
 
 // Read credentials from GET (matches existing app.js approach)
 $email    = trim($_GET['email']    ?? $_POST['email']    ?? '');
