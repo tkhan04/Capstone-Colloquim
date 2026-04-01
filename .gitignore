@@ -1,1 +1,4 @@
 secrets/db.php
+.DS_Store
+colloquium_db.sql
+example_roster.csv

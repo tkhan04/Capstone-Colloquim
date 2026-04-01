@@ -1,25 +1,53 @@
-function callPHP() {
-    // This calls our PHP file (backend.php) from the browser.
-    // The PHP file connects to MySQL and returns a JSON response.
-    fetch('backend.php')
-        // Convert the HTTP response into JSON so we can read fields like data.ok, data.message, etc.
-        .then(response => response.json())
-        .then(data => {
-            // If the backend says ok=true, display the success message + database name.
-            if (data && data.ok) {
-                document.getElementById('result').innerHTML = data.message;
-                document.getElementById('database').innerHTML = data.database ? ('Database: ' + data.database) : '';
+/**
+ * APP.JS - Frontend JavaScript for Colloquium Attendance System
+ *
+ * handleLogin() - sends email + password to login.php, redirects on success
+ */
+
+/**
+ * HANDLE LOGIN FORM SUBMISSION
+ * Sends email and password to login.php via GET.
+ * On success, login.php returns JSON with redirect URL.
+ */
+function handleLogin(event) {
+    event.preventDefault();
+
+    const email     = document.getElementById('email').value.trim();
+    const password  = document.getElementById('password').value;
+    const resultDiv = document.getElementById('loginResult');
+
+    if (!email || !password) {
+        resultDiv.innerHTML = '<div class="login-error"><i class="fas fa-exclamation-circle"></i> Please enter your email and password.</div>';
+        return;
+    }
+
+    resultDiv.innerHTML = '<div class="login-loading"><i class="fas fa-spinner fa-spin"></i> Signing in...</div>';
+
+    // Pass credentials to login.php
+    const url = 'login.php?email=' + encodeURIComponent(email) + '&password=' + encodeURIComponent(password);
+
+    fetch(url)
+        .then(r => r.text())
+        .then(text => {
+            let data;
+            try { data = JSON.parse(text); }
+            catch(e) {
+                resultDiv.innerHTML = '<div class="login-error"><i class="fas fa-exclamation-triangle"></i> Unexpected server response.</div>';
+                console.error('Raw response:', text);
                 return;
             }
 
-            // If ok=false, show the error message the backend sent (or a generic fallback).
-            const errMsg = (data && data.error) ? data.error : 'Unknown error';
-            document.getElementById('result').innerHTML = 'Error: ' + errMsg;
-            document.getElementById('database').innerHTML = '';
+            if (data && data.ok && data.redirect) {
+                // Show welcome then redirect
+                const role = data.user.role.charAt(0).toUpperCase() + data.user.role.slice(1);
+                resultDiv.innerHTML = `<div class="login-success"><i class="fas fa-check-circle"></i> Welcome, ${role}! Redirecting...</div>`;
+                setTimeout(() => { window.location.href = data.redirect; }, 900);
+            } else {
+                const msg = (data && data.error) ? data.error : 'Login failed. Please check your credentials.';
+                resultDiv.innerHTML = `<div class="login-error"><i class="fas fa-user-times"></i> ${msg}</div>`;
+            }
         })
-        .catch(error => {
-            // This catches network/parse errors (example: backend is down, PHP error, non-JSON response).
-            document.getElementById('result').innerHTML = 'Error: ' + error;
-            document.getElementById('database').innerHTML = '';
+        .catch(err => {
+            resultDiv.innerHTML = `<div class="login-error"><i class="fas fa-wifi"></i> Connection error: ${err.message}</div>`;
         });
 }
