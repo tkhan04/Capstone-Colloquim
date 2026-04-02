@@ -16,6 +16,8 @@
  *   Event(event_id, event_name, event_type, start_time, end_time, location)
  */
 
+//Test comment
+
 session_start();
 require __DIR__ . '/../secrets/db.php';
 
