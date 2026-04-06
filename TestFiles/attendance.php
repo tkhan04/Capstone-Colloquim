@@ -43,6 +43,9 @@ try {
 // Handle sign-in/out form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
     $studentId = trim($_POST['student_id'] ?? '');
+    
+    // Remove all non-numeric characters from scanner input
+    $studentId = preg_replace('/[^0-9]/', '', $studentId);
 
     if ($studentId === '') {
         $message     = 'Please enter your Student ID.';
