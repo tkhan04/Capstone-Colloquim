@@ -81,9 +81,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         #yearGroup { display: none; }
+        .back-button {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: #003366;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            text-decoration: none;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: background 0.3s ease;
+        }
+        .back-button:hover {
+            background: #ff6600;
+        }
     </style>
 </head>
 <body>
+    <a href="index.html" class="back-button">
+        <i class="fas fa-arrow-left"></i> Login
+    </a>
     <div class="container">
         <img src="gburglogo.jpg" alt="Gettysburg College Logo" class="logo">
         <h1><i class="fas fa-user-plus" style="color:#ff6600;"></i> Create Account</h1>
