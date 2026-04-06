@@ -12,18 +12,19 @@
 function handleLogin(event) {
     event.preventDefault();
 
-    const email     = document.getElementById('email').value.trim();
+    const username  = document.getElementById('username').value.trim();
     const password  = document.getElementById('password').value;
     const resultDiv = document.getElementById('loginResult');
 
-    if (!email || !password) {
-        resultDiv.innerHTML = '<div class="login-error"><i class="fas fa-exclamation-circle"></i> Please enter your email and password.</div>';
+    if (!username || !password) {
+        resultDiv.innerHTML = '<div class="login-error"><i class="fas fa-exclamation-circle"></i> Please enter your username and password.</div>';
         return;
     }
 
     resultDiv.innerHTML = '<div class="login-loading"><i class="fas fa-spinner fa-spin"></i> Signing in...</div>';
 
-    // Pass credentials to login.php
+    // Convert username to Gettysburg email and pass to login.php
+    const email = username + '@gettysburg.edu';
     const url = 'login.php?email=' + encodeURIComponent(email) + '&password=' + encodeURIComponent(password);
 
     fetch(url)

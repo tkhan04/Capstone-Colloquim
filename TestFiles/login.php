@@ -3,6 +3,7 @@
  * LOGIN.PHP - Authentication handler
  *
  * Accepts: GET ?email=...&password=...
+ * Converts username to email and validates Gettysburg email format.
  * Checks AppUser table (email + password_hash).
  * Returns JSON: { ok, redirect, user } on success
  *               { ok, error } on failure
@@ -24,7 +25,13 @@ $email    = trim($_GET['email']    ?? $_POST['email']    ?? '');
 $password =      $_GET['password'] ?? $_POST['password'] ?? '';
 
 if ($email === '' || $password === '') {
-    echo json_encode(['ok' => false, 'error' => 'Email and password are required.']);
+    echo json_encode(['ok' => false, 'error' => 'Username and password are required.']);
+    exit;
+}
+
+// Validate Gettysburg email format
+if (!preg_match('/^[a-zA-Z0-9._%+-]+@gettysburg\.edu$/', $email)) {
+    echo json_encode(['ok' => false, 'error' => 'Must be a valid Gettysburg email address (username@gettysburg.edu).']);
     exit;
 }
 
