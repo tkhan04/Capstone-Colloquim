@@ -43,6 +43,9 @@ try {
 // Handle sign-in/out form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
     $studentId = trim($_POST['student_id'] ?? '');
+    
+    // Remove all non-numeric characters from scanner input
+    $studentId = preg_replace('/[^0-9]/', '', $studentId);
 
     if ($studentId === '') {
         $message     = 'Please enter your Student ID.';
@@ -148,7 +151,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                 <input type="text" id="student_id" name="student_id"
                        placeholder="Scan your ID card or type manually"
                        autofocus required autocomplete="off"
-                       inputmode="numeric" pattern="\d{6,8}">
+                       inputmode="numeric" pattern="[0-9]{6,8}" 
+                       maxlength="8" onkeypress="return event.charCode >= 48 && event.charCode <= 57"
+                       oninput="this.value = this.value.replace(/[^0-9]/g, '')">
             </div>
             <button type="submit" class="btn-primary">
                 <i class="fas fa-sign-in-alt"></i> Check In / Check Out
