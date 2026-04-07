@@ -52,3 +52,28 @@ function handleLogin(event) {
             resultDiv.innerHTML = `<div class="login-error"><i class="fas fa-wifi"></i> Connection error: ${err.message}</div>`;
         });
 }
+
+// Clear any lingering login messages when page loads or gets focus (for back navigation)
+document.addEventListener('DOMContentLoaded', function() {
+    clearLoginMessage();
+});
+
+// Also clear when page gets focus (handles back navigation better)
+window.addEventListener('pageshow', function(event) {
+    // pageshow fires when navigating back (including from cache)
+    clearLoginMessage();
+});
+
+// Clear when input fields get focus (user interaction)
+document.addEventListener('focus', function(event) {
+    if (event.target.id === 'username' || event.target.id === 'password') {
+        clearLoginMessage();
+    }
+}, true);
+
+function clearLoginMessage() {
+    const resultDiv = document.getElementById('loginResult');
+    if (resultDiv) {
+        resultDiv.innerHTML = '';
+    }
+}
