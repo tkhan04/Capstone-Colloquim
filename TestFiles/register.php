@@ -59,7 +59,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 )->execute([(int)$userId, $fname, $lname, $email]);
             }
 
-            $success = 'Account created! <a href="index.html">Sign in now</a>.';
+            // Auto-redirect to login with success message
+            header('Location: index.html?message=Account created!');
+            exit;
 
         } catch (PDOException $e) {
             if ($e->getCode() === '23000') {
@@ -194,9 +196,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </button>
         </form>
 
-        <div class="login-footer">
-            <a href="index.html"><i class="fas fa-sign-in-alt"></i> Back to Sign In</a>
-        </div>
     </div>
 
     <script>

@@ -115,7 +115,7 @@ $attendanceRate = $totalRequired > 0
         </div>
         <div class="nav-user">
             <?php if ($student): ?>
-            <span>Student ID <?= $studentId ?></span>
+            <span>Welcome <?= $student['fname'] ?> <?= $student['lname'] ?>!</span>
             <?php endif; ?>
             <a href="index.html" class="btn-logout"><i class="fas fa-sign-out-alt"></i></a>
         </div>
