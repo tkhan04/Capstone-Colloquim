@@ -55,13 +55,27 @@ function handleLogin(event) {
 
 // Clear any lingering login messages when page loads or gets focus (for back navigation)
 document.addEventListener('DOMContentLoaded', function() {
-    clearLoginMessage();
+    // Show success message from registration redirect FIRST
+    const urlParams = new URLSearchParams(window.location.search);
+    const message = urlParams.get('message');
+    if (message) {
+        const resultDiv = document.getElementById('loginResult');
+        if (resultDiv) {
+            resultDiv.innerHTML = `<div class="login-success"><i class="fas fa-check-circle"></i> ${message}</div>`;
+        }
+    } else {
+        // Only clear if there's no success message
+        clearLoginMessage();
+    }
 });
 
 // Also clear when page gets focus (handles back navigation better)
 window.addEventListener('pageshow', function(event) {
-    // pageshow fires when navigating back (including from cache)
-    clearLoginMessage();
+    // Don't clear if there's a success message in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    if (!urlParams.get('message')) {
+        clearLoginMessage();
+    }
 });
 
 // Clear when input fields get focus (user interaction)
