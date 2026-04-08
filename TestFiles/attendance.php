@@ -152,7 +152,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                        placeholder="Scan your ID card or type manually"
                        autofocus required autocomplete="off"
                        inputmode="numeric" pattern="[0-9]{6,8}" 
-                       maxlength="8" onkeypress="return event.charCode >= 48 && event.charCode <= 57"
+                       maxlength="7" onkeypress="return event.charCode >= 48 && event.charCode <= 57"
                        oninput="this.value = this.value.replace(/[^0-9]/g, '')">
             </div>
             <button type="submit" class="btn-primary">
