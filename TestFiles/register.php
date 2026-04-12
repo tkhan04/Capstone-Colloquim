@@ -210,3 +210,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </script>
 </body>
 </html>
+
+/*
+bugs:
+
+What if two students have the same userid? 
+you can still login with a gmail account
+fix when entering a username that it lets you in_array
+
+*/
