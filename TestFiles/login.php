@@ -1,18 +1,4 @@
 <?php
-/**
- * LOGIN.PHP - Authentication handler
- *
- * Accepts: GET ?email=...&password=...
- * Converts username to email and validates Gettysburg email format.
- * Checks AppUser table (email + password_hash).
- * Returns JSON: { ok, redirect, user } on success
- *               { ok, error } on failure
- *
- * DB columns used (matches provided schema):
- *   AppUser: user_id, fname, lname, email, role, password_hash, is_active
- *   Professor: professor_id (= user_id FK)
- *   Student:   student_id  (= user_id FK)
- */
 
 header('Content-Type: application/json');
 ini_set('display_errors', 0); // hide PHP errors from JSON output

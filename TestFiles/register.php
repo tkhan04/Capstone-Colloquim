@@ -35,6 +35,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = 'Passwords do not match.';
     } elseif (!in_array($role, ['student', 'professor', 'admin'])) {
         $error = 'Invalid role.';
+    } elseif (!preg_match('/^[a-zA-Z0-9._%+-]+@gettysburg\.edu$/', $email)) {
+        $error = 'Must use a Gettysburg email address (username@gettysburg.edu).';
     } else {
         try {
             $pdo  = getDB();
@@ -156,6 +158,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <label>Email</label>
                 <input type="email" name="email" placeholder="yourname@gettysburg.edu" required
                        value="<?= htmlspecialchars($_POST['email'] ?? '') ?>">
+                <!-- TODO: if email doesn't end with @gettysburg.edu, show error -->
+                 <span id="email-error" style="color: red; display: none;">Email must end with @gettysburg.edu</span>
             </div>
 
             <div class="input-group">
