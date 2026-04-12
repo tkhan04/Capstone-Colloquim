@@ -11,72 +11,42 @@
  */
 
 // ---------------------------
-// Mock data (replace later)
+// DB data
 // ---------------------------
+require __DIR__ . '/secrets/db.php';
+
+$profId = 1;
+
 $professorName = "Professor";
 
-$classes = [
-  [
-    "code" => "CS111",
-    "term" => "Spring 2026",
-    "title" => "Introduction to Computer Science",
-    "students" => 5,
-    "events" => 3,
-  ],
-  [
-    "code" => "CS216",
-    "term" => "Spring 2026",
-    "title" => "Data Structures and Algorithms",
-    "students" => 5,
-    "events" => 4,
-  ],
-  [
-    "code" => "CS301",
-    "term" => "Spring 2026",
-    "title" => "Theory of Computation",
-    "students" => 4,
-    "events" => 3,
-  ],
-  [
-    "code" => "CS360",
-    "term" => "Spring 2026",
-    "title" => "Principles of Database Systems",
-    "students" => 4,
-    "events" => 3,
-  ],
-];
+try {
+    $pdo = getDB();
+    $stmt = $pdo->prepare("SELECT fname, lname FROM Professor WHERE professor_id = ?");
+    $stmt->execute([$profId]);
+    $prof = $stmt->fetch();
+    if ($prof) $professorName = $prof['fname'] . ' ' . $prof['lname'];
+} catch (Exception $e) {
+    // fallback
+}
+
+$classes = [];
+try {
+    $stmt = $pdo->prepare("
+        SELECT c.course_id as code, c.course_name as title, CONCAT(c.semester, ' ', c.year) as term, COUNT(DISTINCT eic.student_id) as students, COUNT(DISTINCT aes.event_id) as events
+        FROM Course c
+        JOIN CourseAssignment ca ON c.course_id = ca.course_id
+        LEFT JOIN EnrollmentInCourses eic ON c.course_id = eic.course_id AND eic.status = 'active'
+        LEFT JOIN AttendsEventSessions aes ON eic.student_id = aes.student_id
+        WHERE ca.professor_id = ?
+        GROUP BY c.course_id, c.course_name, c.semester, c.year
+    ");
+    $stmt->execute([$profId]);
+    $classes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $classes = [];
+}
 
 // Students per class (mock)
-$studentsByClass = [
-  "CS216" => [
-    ["name" => "Alice Johnson", "email" => "alice.johnson@university.edu", "attended" => 2],
-    ["name" => "Carol Williams", "email" => "carol.williams@university.edu", "attended" => 4],
-    ["name" => "Emma Davis", "email" => "emma.davis@university.edu", "attended" => 4],
-    ["name" => "Frank Miller", "email" => "frank.miller@university.edu", "attended" => 1],
-    ["name" => "Henry Moore", "email" => "henry.moore@university.edu", "attended" => 2],
-  ],
-  // Provide defaults for other classes (optional)
-  "CS111" => [
-    ["name" => "Sam Student", "email" => "sam.student@university.edu", "attended" => 2],
-    ["name" => "Jamie Student", "email" => "jamie.student@university.edu", "attended" => 3],
-    ["name" => "Taylor Student", "email" => "taylor.student@university.edu", "attended" => 1],
-    ["name" => "Jordan Student", "email" => "jordan.student@university.edu", "attended" => 3],
-    ["name" => "Casey Student", "email" => "casey.student@university.edu", "attended" => 2],
-  ],
-  "CS301" => [
-    ["name" => "Morgan Lee", "email" => "morgan.lee@university.edu", "attended" => 2],
-    ["name" => "Riley Chen", "email" => "riley.chen@university.edu", "attended" => 3],
-    ["name" => "Avery Patel", "email" => "avery.patel@university.edu", "attended" => 1],
-    ["name" => "Quinn Davis", "email" => "quinn.davis@university.edu", "attended" => 3],
-  ],
-  "CS360" => [
-    ["name" => "Noah Smith", "email" => "noah.smith@university.edu", "attended" => 3],
-    ["name" => "Olivia Brown", "email" => "olivia.brown@university.edu", "attended" => 2],
-    ["name" => "Liam Wilson", "email" => "liam.wilson@university.edu", "attended" => 1],
-    ["name" => "Emma Clark", "email" => "emma.clark@university.edu", "attended" => 3],
-  ],
-];
-
 // ---------------------------
 // Helpers
 // ---------------------------
@@ -95,7 +65,21 @@ function statusFromRate($ratePercent) {
   if ($ratePercent >= 45) return ["Fair", "pill fair"];
   return ["Poor", "pill poor"];
 }
-
+// Summary
+$totalEventsAttended = 0;
+$attendanceRate = 0;
+$status = 'Inactive';
+try {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM Event WHERE created_by = ?");
+    $stmt->execute([$profId]);
+    $totalEventsAttended = $stmt->fetchColumn();
+    $stmt = $pdo->prepare("SELECT AVG(att_count) FROM (SELECT COUNT(DISTINCT student_id) as att_count FROM AttendsEventSessions aes JOIN Event e ON aes.event_id = e.event_id WHERE e.created_by = ? GROUP BY aes.event_id) as sub");
+    $stmt->execute([$profId]);
+    $attendanceRate = round($stmt->fetchColumn() ?: 0, 1);
+    if (count($classes) > 0) $status = 'Active';
+} catch (Exception $e) {
+    // fallback
+}
 // ---------------------------
 // Routing
 // ---------------------------

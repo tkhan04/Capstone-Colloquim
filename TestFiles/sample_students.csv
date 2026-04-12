@@ -1,0 +1,7 @@
+student_id,fname,lname,email,year
+1234567,John,Doe,john.doe@gettysburg.edu,Freshman
+1234568,Jane,Smith,jane.smith@gettysburg.edu,Sophomore
+1234569,Michael,Johnson,michael.johnson@gettysburg.edu,Junior
+1234570,Sarah,Williams,sarah.williams@gettysburg.edu,Senior
+1234571,David,Brown,david.brown@gettysburg.edu,Freshman</content>
+<parameter name="filePath">/Users/adib_kabir/CS Capstone/Capstone-Colloquim/TestFiles/sample_students.csv

@@ -315,6 +315,24 @@ button[type='submit']:hover {
     width: 20px;
 }
 
+/* Multiple events styling */
+.event-item {
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+}
+
+.event-item:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+}
+
+.event-item h4 {
+    color: #003366;
+    margin-bottom: 0.5rem;
+    font-size: 1.1rem;
+}
+
 /* ===========================================
    DASHBOARD PAGE STYLES
    Shared styles for professor and student dashboards

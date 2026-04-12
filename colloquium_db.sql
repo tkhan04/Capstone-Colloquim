@@ -96,17 +96,21 @@ CREATE TABLE Event (
 CREATE TABLE AttendsEventSessions (
     student_id INT NOT NULL,
     event_id INT NOT NULL,
+    course_id VARCHAR(20) NOT NULL,
     start_scan_time DATETIME NULL,
     end_scan_time DATETIME NULL,
     minutes_present INT GENERATED ALWAYS AS (TIMESTAMPDIFF(MINUTE, start_scan_time, end_scan_time)) STORED,
     audit_note TEXT NULL,
     overridden_by INT NULL,
-    CONSTRAINT pk_attendance PRIMARY KEY (student_id, event_id),
+    CONSTRAINT pk_attendance PRIMARY KEY (student_id, event_id, course_id),
     CONSTRAINT fk_att_student FOREIGN KEY (student_id)
         REFERENCES Student(student_id)
         ON UPDATE CASCADE ON DELETE CASCADE,
     CONSTRAINT fk_att_event FOREIGN KEY (event_id)
         REFERENCES Event(event_id)
+        ON UPDATE CASCADE ON DELETE CASCADE,
+    CONSTRAINT fk_att_course FOREIGN KEY (course_id)
+        REFERENCES Course(course_id)
         ON UPDATE CASCADE ON DELETE CASCADE,
     CONSTRAINT fk_att_override FOREIGN KEY (overridden_by)
         REFERENCES AppUser(user_id)

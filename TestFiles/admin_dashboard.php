@@ -433,6 +433,17 @@ try {
         </div>
         <?php endif; ?>
 
+        <!-- Quick Access Actions -->
+        <div class="dashboard-action-row" style="margin-bottom:2rem; padding:1rem; background:#f8f9fa; border-radius:8px; border:1px solid #e9ecef;">
+            <h3 style="margin:0 0 1rem 0; color:#333;">Quick Actions</h3>
+            <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
+                <a href="attendance.php?admin_id=<?= $adminId ?>" class="btn-primary" target="_blank">
+                    <i class="fas fa-id-card"></i> Open Student Check-In Form
+                </a>
+                <span style="color:#666; font-size:.9rem;">Open on department tablet for student check-in/out during events.</span>
+            </div>
+        </div>
+
         <!-- ══════════════════ EVENTS TAB ══════════════════ -->
         <?php if ($activeTab === 'events'): ?>
         <div class="admin-section">
@@ -460,12 +471,14 @@ try {
                             <span><i class="fas fa-map-marker-alt"></i> <?= htmlspecialchars($ev['location'] ?: 'TBD') ?></span>
                         </div>
                     </div>
-                    <!-- Delete event -->
-                    <form method="POST" class="delete-form" onsubmit="return confirm('Delete this event?');">
-                        <input type="hidden" name="action"   value="delete_event">
-                        <input type="hidden" name="event_id" value="<?= $ev['event_id'] ?>">
-                        <button type="submit" class="btn-delete"><i class="fas fa-trash"></i></button>
-                    </form>
+                    <div class="event-actions">
+                        <!-- Delete event -->
+                        <form method="POST" class="delete-form" onsubmit="return confirm('Delete this event?');">
+                            <input type="hidden" name="action"   value="delete_event">
+                            <input type="hidden" name="event_id" value="<?= $ev['event_id'] ?>">
+                            <button type="submit" class="btn-delete"><i class="fas fa-trash"></i></button>
+                        </form>
+                    </div>
                 </div>
                 <?php endforeach; ?>
                 <?php endif; ?>
@@ -517,6 +530,7 @@ try {
                 </form>
             </div>
         </div>
+
         <?php endif; ?>
 
         <!-- ══════════════════ ROSTERS TAB ══════════════════ -->

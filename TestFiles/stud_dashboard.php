@@ -51,8 +51,13 @@ try {
 
         // ── Count completed attendances (both timestamps present) ─────────────
         $stmt = $pdo->prepare(
-            "SELECT COUNT(*) FROM AttendsEventSessions
-             WHERE student_id = ? AND end_scan_time IS NOT NULL"
+            "SELECT COUNT(*)
+             FROM AttendsEventSessions a
+             JOIN Event ev ON a.event_id = ev.event_id
+             WHERE a.student_id = ?
+               AND a.end_scan_time IS NOT NULL
+               AND a.start_scan_time <= DATE_ADD(ev.start_time, INTERVAL 10 MINUTE)
+               AND a.end_scan_time >= ev.end_time"
         );
         $stmt->execute([$studentId]);
         $totalAttended = (int)$stmt->fetchColumn();
