@@ -48,27 +48,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $pdo       = getDB();
         $stuId     = (int)$_POST['student_id'];
         $evId      = (int)$_POST['event_id'];
+        $courseId  = trim($_POST['course_id'] ?? $selectedCourseId);
         $startTime = $_POST['start_scan_time'] ?? null;
         $endTime   = $_POST['end_scan_time']   ?? null;
         $note      = trim($_POST['audit_note'] ?? '');
 
-        // Upsert: update if exists, insert if not
+        // Upsert using composite PK: student_id + event_id + course_id
         $exists = $pdo->prepare(
-            "SELECT 1 FROM AttendsEventSessions WHERE student_id=? AND event_id=?"
+            "SELECT 1 FROM AttendsEventSessions WHERE student_id=? AND event_id=? AND course_id=?"
         );
-        $exists->execute([$stuId, $evId]);
+        $exists->execute([$stuId, $evId, $courseId]);
 
         if ($exists->fetch()) {
             $pdo->prepare(
                 "UPDATE AttendsEventSessions
                  SET start_scan_time=?, end_scan_time=?, audit_note=?, overridden_by=?
-                 WHERE student_id=? AND event_id=?"
-            )->execute([$startTime ?: null, $endTime ?: null, $note, $profId, $stuId, $evId]);
+                 WHERE student_id=? AND event_id=? AND course_id=?"
+            )->execute([$startTime ?: null, $endTime ?: null, $note, $profId,
+                        $stuId, $evId, $courseId]);
         } else {
             $pdo->prepare(
-                "INSERT INTO AttendsEventSessions (student_id, event_id, start_scan_time, end_scan_time, audit_note, overridden_by)
-                 VALUES (?, ?, ?, ?, ?, ?)"
-            )->execute([$stuId, $evId, $startTime ?: null, $endTime ?: null, $note, $profId]);
+                "INSERT INTO AttendsEventSessions
+                     (student_id, event_id, course_id, start_scan_time, end_scan_time, audit_note, overridden_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )->execute([$stuId, $evId, $courseId,
+                        $startTime ?: null, $endTime ?: null, $note, $profId]);
         }
     } catch (PDOException $e) {
         $dbError = $e->getMessage();
@@ -116,77 +120,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         if (!$courseId) {
             $dbError = 'Course must be selected for hackathon check-in.';
         } else {
-            // Verify the event is a hackathon and get its end time
-            $eventCheck = $pdo->prepare("SELECT event_type, end_time FROM Event WHERE event_id = ?");
+            // Verify event is a hackathon AND has not yet ended
+            $nowCheck   = date('Y-m-d H:i:s');
+            $eventCheck = $pdo->prepare(
+                "SELECT event_type, start_time, end_time FROM Event WHERE event_id = ? LIMIT 1"
+            );
             $eventCheck->execute([$eventId]);
             $event = $eventCheck->fetch();
 
             if (!$event || strtolower($event['event_type']) !== 'hackathon') {
                 $dbError = 'Selected event is not a hackathon.';
+            } elseif ($nowCheck > $event['end_time']) {
+                // Hackathon already ended — check-in not allowed
+                $dbError = 'This hackathon has already ended. Check-in is no longer available.';
             } else {
-                $eventEndTime = $event['end_time'];
+                $eventStartTime = $event['start_time'];
+                $eventEndTime   = $event['end_time'];
+
                 $studentIds = $_POST['student_ids'] ?? [];
-                if (!is_array($studentIds)) {
-                    $studentIds = [];
-                }
+                if (!is_array($studentIds)) $studentIds = [];
                 $studentIds = array_values(array_filter($studentIds, fn($id) => ctype_digit((string)$id)));
 
                 if (empty($studentIds)) {
                     $dbError = 'You must select at least one student for hackathon check-in.';
                 } else {
-                    $selectedTime = str_replace('T', ' ', trim($startTime));
-                    if (preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/', $selectedTime)) {
-                        $selectedTime .= ':00';
-                    }
+                    $placeholders = implode(',', array_fill(0, count($studentIds), '?'));
+                    $params       = array_merge([$courseId], $studentIds);
 
-                    $parsedTime = date_create_from_format('Y-m-d H:i:s', $selectedTime);
-                    if (!$parsedTime) {
-                        $parsedTime = new DateTime();
-                        $selectedTime = $parsedTime->format('Y-m-d H:i:s');
-                    }
+                    $stmt = $pdo->prepare(
+                        "SELECT s.student_id
+                         FROM Student s
+                         JOIN EnrollmentInCourses e ON s.student_id = e.student_id
+                         WHERE e.course_id = ? AND e.status = 'active'
+                         AND s.student_id IN ($placeholders)"
+                    );
+                    $stmt->execute($params);
+                    $students = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-                    if ($selectedTime > $eventEndTime) {
-                        $dbError = 'Check-in time must be before the hackathon end time.';
+                    if (empty($students)) {
+                        $dbError = 'No selected students found for this course.';
+                    } elseif (count($students) !== count($studentIds)) {
+                        $dbError = 'Some selected students are not active in this course.';
                     } else {
-                        $placeholders = implode(',', array_fill(0, count($studentIds), '?'));
-                        $params = array_merge([$courseId], $studentIds);
-
-                        $stmt = $pdo->prepare(
-                            "SELECT s.student_id
-                             FROM Student s
-                             JOIN EnrollmentInCourses e ON s.student_id = e.student_id
-                             WHERE e.course_id = ? AND e.status = 'active'
-                             AND s.student_id IN ($placeholders)"
-                        );
-                        $stmt->execute($params);
-                        $students = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
-                        if (empty($students)) {
-                            $dbError = 'No selected students found for this course.';
-                        } elseif (count($students) !== count($studentIds)) {
-                            $dbError = 'Some selected students are not active in this course.';
-                        } else {
-                            $insertStmt = $pdo->prepare(
-                                "INSERT INTO AttendsEventSessions (student_id, event_id, start_scan_time, end_scan_time, audit_note, overridden_by)
-                                 VALUES (?, ?, ?, ?, ?, ?)
-                                 ON DUPLICATE KEY UPDATE
+                        // Use event start_time/end_time so minutes_present is calculated
+                        // and the attendance grid column updates to show full credit
+                        $insertStmt = $pdo->prepare(
+                            "INSERT INTO AttendsEventSessions
+                                 (student_id, event_id, course_id, start_scan_time,
+                                  end_scan_time, audit_note, overridden_by)
+                             VALUES (?, ?, ?, ?, ?, ?, ?)
+                             ON DUPLICATE KEY UPDATE
                                  start_scan_time = VALUES(start_scan_time),
-                                 end_scan_time = VALUES(end_scan_time),
-                                 audit_note = VALUES(audit_note),
-                                 overridden_by = VALUES(overridden_by)"
-                            );
+                                 end_scan_time   = VALUES(end_scan_time),
+                                 audit_note      = VALUES(audit_note),
+                                 overridden_by   = VALUES(overridden_by)"
+                        );
 
-                            $count = 0;
-                            foreach ($students as $studentId) {
-                                $insertStmt->execute([$studentId, $eventId, $selectedTime, $eventEndTime, $note, $profId]);
-                                $count++;
-                            }
-
-                            $_SESSION['flash_message'] = "Hackathon check-in completed for {$count} students.";
-                            $_SESSION['flash_type'] = 'success';
-                            header("Location: ?prof_id={$profId}");
-                            exit;
+                        $count = 0;
+                        foreach ($students as $studentId) {
+                            $insertStmt->execute([
+                                $studentId, $eventId, $courseId,
+                                $eventStartTime, $eventEndTime, $note, $profId
+                            ]);
+                            $count++;
                         }
+
+                        $_SESSION['flash_message'] = "Hackathon check-in completed for {$count} student(s). "
+                            . "Their attendance is now reflected in the course table below.";
+                        $_SESSION['flash_type'] = 'success';
+                        // Redirect back to this course so the professor sees updated attendance
+                        header("Location: ?prof_id={$profId}&course_id=" . urlencode($courseId));
+                        exit;
                     }
                 }
             }
@@ -365,14 +369,41 @@ try {
             foreach ($rows as $stu) {
                 $attended = 0;
                 if ($filterType) {
+                    // Count events attended: either normal check-in/out within timing rules,
+                    // OR professor-override (hackathon manual check-in sets overridden_by)
                     $aStmt = $pdo->prepare(
-                        "SELECT COUNT(DISTINCT a.event_id) FROM AttendsEventSessions a JOIN Event ev ON a.event_id = ev.event_id WHERE a.student_id = ? AND a.course_id = ? AND ev.event_type = ? AND a.end_scan_time IS NOT NULL AND a.start_scan_time <= DATE_ADD(ev.start_time, INTERVAL 10 MINUTE) AND a.end_scan_time >= ev.end_time"
+                        "SELECT COUNT(DISTINCT a.event_id)
+                         FROM AttendsEventSessions a
+                         JOIN Event ev ON a.event_id = ev.event_id
+                         WHERE a.student_id = ?
+                           AND a.course_id  = ?
+                           AND ev.event_type = ?
+                           AND a.end_scan_time IS NOT NULL
+                           AND (
+                               a.overridden_by IS NOT NULL
+                               OR (
+                                   a.start_scan_time <= DATE_ADD(ev.start_time, INTERVAL 5 MINUTE)
+                                   AND a.end_scan_time >= ev.end_time
+                               )
+                           )"
                     );
                     $aStmt->execute([$stu['student_id'], $selectedCourseId, $filterType]);
                     $attended = (int)$aStmt->fetchColumn();
                 } else {
                     $aStmt = $pdo->prepare(
-                        "SELECT COUNT(DISTINCT a.event_id) FROM AttendsEventSessions a JOIN Event ev ON a.event_id = ev.event_id WHERE a.student_id = ? AND a.course_id = ? AND a.end_scan_time IS NOT NULL AND a.start_scan_time <= DATE_ADD(ev.start_time, INTERVAL 10 MINUTE) AND a.end_scan_time >= ev.end_time"
+                        "SELECT COUNT(DISTINCT a.event_id)
+                         FROM AttendsEventSessions a
+                         JOIN Event ev ON a.event_id = ev.event_id
+                         WHERE a.student_id = ?
+                           AND a.course_id  = ?
+                           AND a.end_scan_time IS NOT NULL
+                           AND (
+                               a.overridden_by IS NOT NULL
+                               OR (
+                                   a.start_scan_time <= DATE_ADD(ev.start_time, INTERVAL 5 MINUTE)
+                                   AND a.end_scan_time >= ev.end_time
+                               )
+                           )"
                     );
                     $aStmt->execute([$stu['student_id'], $selectedCourseId]);
                     $attended = (int)$aStmt->fetchColumn();
@@ -924,19 +955,29 @@ if ($doExport && !$dbError && $selectedCourse) {
                     <select name="event_id" required>
                         <option value="">-- Select Hackathon --</option>
                         <?php
-                        // Get all hackathon events
-                        $hackathonStmt = $pdo->query(
+                        // Only show hackathon events that have NOT ended yet
+                        // Once end_time passes, event disappears from the list
+                        $hackNow = date('Y-m-d H:i:s');
+                        $hackathonStmt = $pdo->prepare(
                             "SELECT event_id, event_name, start_time, end_time
                              FROM Event
                              WHERE LOWER(event_type) = 'hackathon'
-                             ORDER BY start_time DESC"
+                               AND end_time > ?
+                             ORDER BY start_time ASC"
                         );
+                        $hackathonStmt->execute([$hackNow]);
                         $hackathons = $hackathonStmt->fetchAll();
+                        if (empty($hackathons)): ?>
+                        <option value="" disabled>No active hackathon events available</option>
+                        <?php else:
                         foreach ($hackathons as $hack): ?>
                         <option value="<?= $hack['event_id'] ?>">
-                            <?= htmlspecialchars($hack['event_name']) ?> (<?= date('M j, Y g:i A', strtotime($hack['start_time'])) ?>)
+                            <?= htmlspecialchars($hack['event_name']) ?>
+                            (<?= date('M j, Y g:i A', strtotime($hack['start_time'])) ?>
+                             – ends <?= date('g:i A', strtotime($hack['end_time'])) ?>)
                         </option>
-                        <?php endforeach; ?>
+                        <?php endforeach;
+                        endif; ?>
                     </select>
                 </div>
 
@@ -956,18 +997,13 @@ if ($doExport && !$dbError && $selectedCourse) {
                 <div id="hackathonStudentSelection" class="form-group" style="display:none;">
                     <label>Students Attending *</label>
                     <div id="hackathonStudentList" class="student-checkbox-list"></div>
-                    <small>Select the students who attended this hackathon.</small>
-                </div>
-
-                <div class="form-group">
-                    <label>Check-in Time</label>
-                    <input type="datetime-local" name="checkin_time" value="<?= date('Y-m-d\TH:i') ?>">
-                    <small>Leave blank to use current time.</small>
+                    <small>Select the students who attended this hackathon. They will receive full credit.</small>
                 </div>
 
                 <div class="form-group">
                     <label>Audit Note</label>
                     <input type="text" name="audit_note" value="Hackathon check-in by professor" placeholder="Reason for check-in">
+                    <small>This note is saved alongside the attendance record for audit purposes.</small>
                 </div>
 
                 <div class="form-actions">
