@@ -17,6 +17,7 @@
 session_start();
 
 require __DIR__ . '/../secrets/db.php';
+require __DIR__ . '/upload_roster.php';
 $adminId         = (int)($_GET['admin_id'] ?? 1);
 $activeTab       = $_GET['tab']       ?? 'events';
 $selectedCourseId = trim($_GET['course_id'] ?? ''); // VARCHAR(20) - do not cast to int
@@ -29,31 +30,6 @@ if (!empty($_SESSION['flash_message'])) {
     $message     = $_SESSION['flash_message'];
     $messageType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_message'], $_SESSION['flash_type']);
-}
-
-// ── Helper: normalize CSV header to lowercase_snake_case ──────────────────────
-function normalizeCsvHeader($h) {
-    $h = strtolower(trim((string)$h));
-    $h = preg_replace('/[^a-z0-9]+/', '_', $h);
-    return trim($h, '_');
-}
-
-// ── Helper: pull first non-empty value from a CSV row using candidate keys ────
-function csvVal($row, $keys) {
-    foreach ($keys as $k) {
-        if (isset($row[$k]) && trim((string)$row[$k]) !== '') return trim((string)$row[$k]);
-    }
-    return '';
-}
-
-// ── Helper: map raw year strings to Student.year ENUM values ─────────────────
-function normalizeYear($raw) {
-    $y = strtolower(trim((string)$raw));
-    if (in_array($y, ['freshman','freshmen','1','1st','first'], true))  return 'Freshman';
-    if (in_array($y, ['sophomore','2','2nd','second'], true))           return 'Sophomore';
-    if (in_array($y, ['junior','3','3rd','third'], true))               return 'Junior';
-    if (in_array($y, ['senior','4','4th','fourth'], true))              return 'Senior';
-    return 'Freshman'; // safe default
 }
 
 try {
@@ -137,15 +113,48 @@ try {
             $profId   = (int)($_POST['professor_id'] ?? 0);
             if ($courseId && $profId) {
                 try {
-                    $pdo->prepare(
-                        "INSERT IGNORE INTO CourseAssignment (course_id, professor_id) VALUES (?, ?)"
-                    )->execute([$courseId, $profId]);
-                    $message = 'Professor assigned to course.';
-                    $messageType = 'success';
+                    // Check if already assigned
+                    $chk = $pdo->prepare(
+                        "SELECT assignment_id FROM CourseAssignment WHERE course_id = ? AND professor_id = ? LIMIT 1"
+                    );
+                    $chk->execute([$courseId, $profId]);
+                    $pn = $pdo->prepare("SELECT fname, lname FROM Professor WHERE professor_id = ? LIMIT 1");
+                    $pn->execute([$profId]);
+                    $prow = $pn->fetch();
+                    $profName = $prow ? $prow['fname'] . ' ' . $prow['lname'] : 'That professor';
+                    if ($chk->fetch()) {
+                        $_SESSION['flash_message'] = "{$profName} is already assigned to {$courseId}.";
+                        $_SESSION['flash_type']    = 'error';
+                    } else {
+                        $pdo->prepare(
+                            "INSERT INTO CourseAssignment (course_id, professor_id) VALUES (?, ?)"
+                        )->execute([$courseId, $profId]);
+                        $_SESSION['flash_message'] = "{$profName} successfully assigned to {$courseId}.";
+                        $_SESSION['flash_type']    = 'success';
+                    }
+                    header("Location: ?admin_id={$adminId}&tab=courses");
+                    exit;
                 } catch (PDOException $e) {
-                    $message = 'Error assigning professor: ' . $e->getMessage();
-                    $messageType = 'error';
+                    $_SESSION['flash_message'] = 'Error: ' . $e->getMessage();
+                    $_SESSION['flash_type']    = 'error';
+                    header("Location: ?admin_id={$adminId}&tab=courses");
+                    exit;
                 }
+            }
+        }
+
+        // ── REMOVE PROFESSOR FROM COURSE ───────────────────────────────────────
+        if ($action === 'remove_professor') {
+            $courseId = trim($_POST['course_id'] ?? '');
+            $profId   = (int)($_POST['professor_id'] ?? 0);
+            if ($courseId && $profId) {
+                $pdo->prepare(
+                    "DELETE FROM CourseAssignment WHERE course_id = ? AND professor_id = ?"
+                )->execute([$courseId, $profId]);
+                $_SESSION['flash_message'] = 'Professor removed from course.';
+                $_SESSION['flash_type']    = 'success';
+                header("Location: ?admin_id={$adminId}&tab=courses");
+                exit;
             }
         }
 
@@ -195,10 +204,9 @@ try {
             exit;
         }
 
-        // ── UPLOAD CSV ROSTER ───────────────────────────────────────────────────
-        // CSV must have at minimum: student_id, fname (or first_name), lname (or last_name), email
-        // Optional: year
-        // Creates AppUser + Student rows if they don't exist, then enrolls student in the course.
+        // ── UPLOAD ROSTER CSV ─────────────────────────────────────────────────────────
+        // Accepts Gettysburg PeopleSoft CSV export: ID, Name, Level
+        // Creates AppUser + Student rows + enrolls in course
         if ($action === 'upload_roster_csv') {
             $courseId = trim($_POST['course_id'] ?? '');
             if ($selectedCourseId) $courseId = (string)$selectedCourseId;
@@ -216,121 +224,38 @@ try {
                 };
                 $message = $errMsg;
                 $messageType = 'error';
-            } elseif (strtolower(pathinfo($_FILES['roster_csv']['name'], PATHINFO_EXTENSION)) !== 'csv') {
-                $message = 'Please upload a .csv file.';
-                $messageType = 'error';
             } else {
-                $handle = fopen($_FILES['roster_csv']['tmp_name'], 'r');
-                $rawHeaders = fgetcsv($handle, 0, ',', '"', '\\');
-                $headers = array_map('normalizeCsvHeader', $rawHeaders ?: []);
+                $ext = strtolower(pathinfo($_FILES['roster_csv']['name'], PATHINFO_EXTENSION));
+                
+                if ($ext !== 'csv') {
+                    $message = 'Please upload a .csv file.';
+                    $messageType = 'error';
+                } else {
+                    $tmpPath = $_FILES['roster_csv']['tmp_name'];
 
-                $created = $enrolled = $skipped = $alreadyIn = 0;
-
-                while (($row = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
-                    // Skip blank rows
-                    if (!array_filter(array_map('trim', $row))) continue;
-
-                    $assoc = array_combine(
-                        $headers,
-                        array_slice(array_pad($row, count($headers), ''), 0, count($headers))
-                    );
-
-                    $email     = strtolower(csvVal($assoc, ['email','student_email','mail']));
-                    $fname     = csvVal($assoc, ['fname','first_name','firstname','given_name']);
-                    $lname     = csvVal($assoc, ['lname','last_name','lastname','surname']);
-                    $rawYear   = csvVal($assoc, ['year','class_year','classyear']);
-                    $csvStuId  = csvVal($assoc, ['student_id','studentid','id','student_number']);
-                    $stuIdInt  = ctype_digit($csvStuId) ? (int)$csvStuId : 0;
-                    $yearEnum  = normalizeYear($rawYear);
-
-                    // full_name fallback
-                    if (!$fname || !$lname) {
-                        $full = csvVal($assoc, ['name','full_name','student_name']);
-                        $parts = preg_split('/\s+/', trim($full));
-                        if (!$fname) $fname = array_shift($parts) ?: 'Student';
-                        if (!$lname) $lname = implode(' ', $parts) ?: 'User';
-                    }
-
-                    if (!$email) { $skipped++; continue; }
-
-                    // Find or create student (look up by ID first, then email)
-                    $studentId = 0;
-
-                    if ($stuIdInt > 0) {
-                        $r = $pdo->prepare("SELECT student_id FROM Student WHERE student_id = ? LIMIT 1");
-                        $r->execute([$stuIdInt]);
-                        if ($row2 = $r->fetch()) $studentId = (int)$row2['student_id'];
-                    }
-
-                    if (!$studentId) {
-                        $r = $pdo->prepare("SELECT student_id FROM Student WHERE email = ? LIMIT 1");
-                        $r->execute([$email]);
-                        if ($row2 = $r->fetch()) $studentId = (int)$row2['student_id'];
-                    }
-
-                    if (!$studentId) {
-                        // Need to create AppUser + Student rows
-                        // Check if AppUser already exists for this email
-                        $r = $pdo->prepare("SELECT user_id FROM AppUser WHERE email = ? LIMIT 1");
-                        $r->execute([$email]);
-                        $existing = $r->fetch();
-
-                        if ($existing) {
-                            $userId = (int)$existing['user_id'];
-                        } else {
-                            // Insert AppUser with a temp password; admin can reset later
-                            $hash = password_hash('changeme123', PASSWORD_DEFAULT);
-                            try {
-                                if ($stuIdInt > 0) {
-                                    $pdo->prepare(
-                                        "INSERT INTO AppUser (user_id, fname, lname, email, role, password_hash, is_active)
-                                         VALUES (?, ?, ?, ?, 'student', ?, 1)"
-                                    )->execute([$stuIdInt, $fname, $lname, $email, $hash]);
-                                    $userId = $stuIdInt;
-                                } else {
-                                    $pdo->prepare(
-                                        "INSERT INTO AppUser (fname, lname, email, role, password_hash, is_active)
-                                         VALUES (?, ?, ?, 'student', ?, 1)"
-                                    )->execute([$fname, $lname, $email, $hash]);
-                                    $userId = (int)$pdo->lastInsertId();
-                                }
-                            } catch (PDOException $e) { $skipped++; continue; }
+                    // Parse the Gettysburg PeopleSoft CSV export
+                    $parseResult = parseCsvRoster($tmpPath);
+                    
+                    // Check for parse errors
+                    if (isset($parseResult['error'])) {
+                        $message = 'Upload error: ' . $parseResult['error'];
+                        $messageType = 'error';
+                    } else {
+                        // Create student accounts and enrollments using helper
+                        $importResult = createStudentAccounts($pdo, $courseId, $parseResult['data'], 'changeme123');
+                        
+                        $msg = "Upload complete: {$importResult['created']} student(s) created, " .
+                               "{$importResult['enrolled']} enrolled, {$importResult['alreadyIn']} already enrolled.";
+                        if ($importResult['skipped']) {
+                            $msg .= " {$importResult['skipped']} row(s) skipped.";
                         }
-
-                        // Insert Student row (student_id = user_id per schema FK)
-                        try {
-                            $pdo->prepare(
-                                "INSERT IGNORE INTO Student (student_id, fname, lname, email, year)
-                                 VALUES (?, ?, ?, ?, ?)"
-                            )->execute([$userId, $fname, $lname, $email, $yearEnum]);
-                            $studentId = $userId;
-                            $created++;
-                        } catch (PDOException $e) { $skipped++; continue; }
+                        
+                        $_SESSION['flash_message'] = $msg;
+                        $_SESSION['flash_type']    = 'success';
+                        header("Location: ?admin_id={$adminId}&tab=rosters&course_id=" . urlencode($courseId));
+                        exit;
                     }
-
-                    // Enroll in course
-                    $chk = $pdo->prepare(
-                        "SELECT enrollment_id FROM EnrollmentInCourses WHERE student_id = ? AND course_id = ?"
-                    );
-                    $chk->execute([$studentId, $courseId]);
-                    if ($chk->fetch()) { $alreadyIn++; continue; }
-
-                    try {
-                        $pdo->prepare(
-                            "INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')"
-                        )->execute([$studentId, $courseId]);
-                        $enrolled++;
-                    } catch (PDOException $e) { $skipped++; }
                 }
-                fclose($handle);
-
-                // PRG: redirect back to GET URL so the course stays selected and refreshing won't re-POST
-                $msg = "Upload complete: {$created} student(s) created, {$enrolled} enrolled, {$alreadyIn} already enrolled.";
-                if ($skipped) $msg .= " {$skipped} row(s) skipped.";
-                $_SESSION['flash_message'] = $msg;
-                $_SESSION['flash_type']    = 'success';
-                header("Location: ?admin_id={$adminId}&tab=rosters&course_id=" . urlencode($courseId));
-                exit;
             }
         }
 
@@ -342,12 +267,18 @@ try {
 
     // ── FETCH DATA FOR DISPLAY ──────────────────────────────────────────────────
 
-    // Events (newest first)
+    // Events with creator name (newest first)
     $events = $pdo->query(
-        "SELECT event_id, event_name, event_type, start_time, end_time, location FROM Event ORDER BY start_time DESC"
+        "SELECT e.event_id, e.event_name, e.event_type, e.start_time, e.end_time,
+                e.location, e.created_by,
+                CONCAT(u.fname, ' ', u.lname) AS creator_name,
+                u.role AS creator_role
+         FROM Event e
+         LEFT JOIN AppUser u ON u.user_id = e.created_by
+         ORDER BY e.start_time DESC"
     )->fetchAll();
 
-    // Courses with optional professor name via CourseAssignment
+    // Courses with assigned professors (one row per assignment for remove button)
     $courses = $pdo->query(
         "SELECT c.course_id, c.course_name, c.section, c.year, c.semester, c.minimum_events_required,
                 GROUP_CONCAT(CONCAT(p.fname,' ',p.lname) SEPARATOR ', ') AS professors
@@ -357,6 +288,21 @@ try {
          GROUP BY c.course_id
          ORDER BY c.course_id"
     )->fetchAll();
+
+    // Also fetch per-assignment rows so admin can remove individual professors
+    // Build courseAssignments as course_id => [array of assignments]
+    // FETCH_GROUP keys by the FIRST column, so course_id must come first
+    $courseAssignments = [];
+    $caRows = $pdo->query(
+        "SELECT ca.course_id, ca.assignment_id, ca.professor_id,
+                CONCAT(p.fname, ' ', p.lname) AS prof_name
+         FROM CourseAssignment ca
+         JOIN Professor p ON ca.professor_id = p.professor_id
+         ORDER BY ca.course_id, p.lname"
+    )->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($caRows as $row) {
+        $courseAssignments[$row['course_id']][] = $row;
+    }
 
     // All students (for manual add-to-roster dropdown)
     $students = $pdo->query(
@@ -433,8 +379,8 @@ try {
         </div>
         <?php endif; ?>
 
-        <!-- Quick Access Actions -->
-        <div class="dashboard-action-row" style="margin-bottom:2rem; padding:1rem; background:#f8f9fa; border-radius:8px; border:1px solid #e9ecef;">
+        <!-- Quick Access Actions - COMMENTED OUT: Already available in Professor Dashboard -->
+        <!-- <div class="dashboard-action-row" style="margin-bottom:2rem; padding:1rem; background:#f8f9fa; border-radius:8px; border:1px solid #e9ecef;">
             <h3 style="margin:0 0 1rem 0; color:#333;">Quick Actions</h3>
             <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
                 <a href="attendance.php?admin_id=<?= $adminId ?>" class="btn-primary" target="_blank">
@@ -442,7 +388,7 @@ try {
                 </a>
                 <span style="color:#666; font-size:.9rem;">Open on department tablet for student check-in/out during events.</span>
             </div>
-        </div>
+        </div> -->
 
         <!-- ══════════════════ EVENTS TAB ══════════════════ -->
         <?php if ($activeTab === 'events'): ?>
@@ -467,16 +413,28 @@ try {
                         <h3><?= htmlspecialchars($ev['event_name']) ?></h3>
                         <div class="event-meta">
                             <span><i class="fas fa-tag"></i> <?= htmlspecialchars($ev['event_type']) ?></span>
-                            <span><i class="fas fa-calendar"></i> <?= date('n/j/Y, g:i A', strtotime($ev['start_time'])) ?></span>
+                            <span><i class="fas fa-calendar"></i> <?= date('D, M j, Y', strtotime($ev['start_time'])) ?></span>
+                            <span><i class="fas fa-clock"></i> <?= date('g:i A', strtotime($ev['start_time'])) ?> &ndash; <?= date('g:i A', strtotime($ev['end_time'])) ?></span>
                             <span><i class="fas fa-map-marker-alt"></i> <?= htmlspecialchars($ev['location'] ?: 'TBD') ?></span>
+                            <span style="color:#888;font-size:.82rem;">
+                                <i class="fas fa-user"></i>
+                                <?php if ((int)$ev['created_by'] === $adminId): ?>
+                                    <span style="color:#2e7d32;">You</span>
+                                <?php elseif ($ev['creator_name']): ?>
+                                    <?= htmlspecialchars($ev['creator_name']) ?>
+                                    <?php if ($ev['creator_role']): ?><em style="color:#aaa;">(<?= $ev['creator_role'] ?>)</em><?php endif; ?>
+                                <?php else: ?>
+                                    Unknown
+                                <?php endif; ?>
+                            </span>
                         </div>
                     </div>
                     <div class="event-actions">
-                        <!-- Delete event -->
-                        <form method="POST" class="delete-form" onsubmit="return confirm('Delete this event?');">
+                        <!-- Admin can delete any event -->
+                        <form method="POST" class="delete-form" onsubmit="return confirm('Delete "<?= htmlspecialchars(addslashes($ev['event_name'])) ?>"? This removes all attendance records too.');">
                             <input type="hidden" name="action"   value="delete_event">
                             <input type="hidden" name="event_id" value="<?= $ev['event_id'] ?>">
-                            <button type="submit" class="btn-delete"><i class="fas fa-trash"></i></button>
+                            <button type="submit" class="btn-delete" title="Delete event"><i class="fas fa-trash"></i></button>
                         </form>
                     </div>
                 </div>
@@ -487,28 +445,37 @@ try {
 
         <!-- Create Event Modal -->
         <div id="createEventModal" class="modal">
-            <div class="modal-content">
+            <div class="modal-content" style="max-width:780px;width:95vw;">
                 <div class="modal-header">
-                    <h3>Create New Event</h3>
+                    <h3><i class="fas fa-calendar-plus"></i> Create New Event</h3>
                     <button class="modal-close" onclick="closeModal('createEventModal')">&times;</button>
                 </div>
                 <form method="POST">
                     <input type="hidden" name="action" value="create_event">
+                    <!-- Row 1: Name full width -->
                     <div class="form-group">
                         <label>Event Name *</label>
                         <input type="text" name="event_name" required placeholder="e.g., Colloquium 1">
                     </div>
-                    <div class="form-group">
-                        <label>Event Type</label>
-                        <select name="event_type">
-                            <option value="Colloquium">Colloquium</option>
-                            <option value="Hackathon">Hackathon</option>
-                            <option value="ACM Workshop">ACM Workshop</option>
-                            <option value="Seminar">Seminar</option>
-                            <option value="Panel">Panel Discussion</option>
-                            <option value="Other">Other</option>
-                        </select>
+                    <!-- Row 2: Type + Location -->
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Event Type</label>
+                            <select name="event_type">
+                                <option value="Colloquium">Colloquium</option>
+                                <option value="Hackathon">Hackathon</option>
+                                <option value="ACM Workshop">ACM Workshop</option>
+                                <option value="Seminar">Seminar</option>
+                                <option value="Panel">Panel Discussion</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Location</label>
+                            <input type="text" name="location" placeholder="e.g., Glatfelter Hall 201">
+                        </div>
                     </div>
+                    <!-- Row 3: Start + End -->
                     <div class="form-row">
                         <div class="form-group">
                             <label>Start Time *</label>
@@ -519,13 +486,9 @@ try {
                             <input type="datetime-local" name="end_time" required>
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label>Location</label>
-                        <input type="text" name="location" placeholder="e.g., Glatfelter Hall 201">
-                    </div>
                     <div class="form-actions">
                         <button type="button" class="btn-secondary" onclick="closeModal('createEventModal')">Cancel</button>
-                        <button type="submit" class="btn-primary">Create Event</button>
+                        <button type="submit" class="btn-primary"><i class="fas fa-plus"></i> Create Event</button>
                     </div>
                 </form>
             </div>
@@ -580,9 +543,10 @@ try {
                     </button>
                 </form>
                 <p class="upload-hint">
-                    CSV columns: <strong>student_id, fname, lname, email, year</strong>
-                    (or first_name / last_name / name). New students are created automatically
-                    with a temporary password of <code>changeme123</code>.
+                    <strong>Supported format:</strong> .csv (Gettysburg PeopleSoft export)<br>
+                    <strong>CSV columns used:</strong> ID, Name, Level<br>
+                    New students are created automatically with temporary password <code>changeme123</code>.
+                    They must change it when they first log in.
                 </p>
             </div>
 
@@ -595,7 +559,7 @@ try {
                         <option value="">-- Select existing student --</option>
                         <?php foreach ($students as $s): ?>
                         <option value="<?= $s['student_id'] ?>">
-                            <?= htmlspecialchars($s['lname'] . ', ' . $s['fname'] . ' (' . $s['email'] . ')') ?>
+                            <?= htmlspecialchars($s['lname'] . ', ' . $s['fname'] . ' (' . $s['student_id'] . ')') ?>
                         </option>
                         <?php endforeach; ?>
                     </select>
@@ -611,13 +575,13 @@ try {
                 <?php else: ?>
                 <table class="roster-table">
                     <thead>
-                        <tr><th>Name</th><th>Email</th><th>Status</th><th>Remove</th></tr>
+                        <tr><th>Name</th><th>Student ID</th><th>Status</th><th>Remove</th></tr>
                     </thead>
                     <tbody>
                         <?php foreach ($enrollments as $en): ?>
                         <tr>
                             <td><?= htmlspecialchars($en['fname'] . ' ' . $en['lname']) ?></td>
-                            <td><?= htmlspecialchars($en['email']) ?></td>
+                            <td><?= htmlspecialchars($en['student_id']) ?></td>
                             <td><span class="badge <?= $en['status']==='active' ? 'green' : 'orange' ?>">
                                 <?= htmlspecialchars($en['status']) ?></span></td>
                             <td>
@@ -643,71 +607,104 @@ try {
 
         <!-- ══════════════════ COURSES TAB ══════════════════ -->
         <?php if ($activeTab === 'courses'): ?>
+        <style>
+            .course-admin-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:1.25rem; margin-top:1rem; }
+            .course-admin-card { background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:1.25rem 1.5rem; box-shadow:0 1px 4px rgba(0,0,0,.06); transition:box-shadow .18s ease; }
+            .course-admin-card:hover { box-shadow:0 4px 16px rgba(0,0,0,.1); }
+            .course-admin-card-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:.75rem; }
+            .course-admin-card-header h3 { margin:0; font-size:1rem; color:#1a202c; line-height:1.3; }
+            .course-admin-meta { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem; font-size:.8rem; color:#666; }
+            .course-admin-meta span { background:#f1f5f9; padding:.15rem .55rem; border-radius:20px; }
+            .prof-list { margin-bottom:.85rem; }
+            .prof-list-label { font-size:.75rem; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:#888; margin-bottom:.4rem; }
+            .prof-chip { display:inline-flex; align-items:center; gap:.4rem; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; border-radius:20px; padding:.25rem .6rem .25rem .75rem; font-size:.83rem; margin:.2rem .2rem .2rem 0; }
+            .prof-chip-remove { background:none; border:none; cursor:pointer; color:#6366f1; padding:0; line-height:1; font-size:.8rem; transition:color .15s; }
+            .prof-chip-remove:hover { color:#c62828; }
+            .assign-prof-row { display:flex; gap:.5rem; align-items:center; padding-top:.75rem; border-top:1px solid #f1f5f9; }
+            .assign-prof-row select { flex:1; padding:.4rem .6rem; border:1px solid #ccc; border-radius:6px; font-size:.85rem; }
+        </style>
         <div class="admin-section">
             <div class="section-header">
                 <div>
                     <h2>Courses</h2>
-                    <p class="section-subtitle">Create courses and assign professors</p>
+                    <p class="section-subtitle">Manage courses and professor assignments</p>
                 </div>
                 <button class="btn-primary" onclick="openModal('createCourseModal')">
                     <i class="fas fa-plus"></i> Create Course
                 </button>
             </div>
 
-            <!-- Courses table -->
             <?php if (empty($courses)): ?>
-            <p class="no-data"><i class="fas fa-book-open"></i> No courses yet. Create one above.</p>
+            <p class="no-data"><i class="fas fa-book-open"></i> No courses yet. Click "Create Course" to get started.</p>
             <?php else: ?>
-            <div class="table-container">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Course ID</th>
-                            <th>Name</th>
-                            <th>Section</th>
-                            <th>Semester / Year</th>
-                            <th>Min Events</th>
-                            <th>Professor(s)</th>
-                            <th>Assign Prof</th>
-                            <th>Delete</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($courses as $c): ?>
-                        <tr>
-                            <td><span class="badge"><?= htmlspecialchars($c['course_id']) ?></span></td>
-                            <td><?= htmlspecialchars($c['course_name']) ?></td>
-                            <td><?= htmlspecialchars($c['section']) ?></td>
-                            <td><?= htmlspecialchars($c['semester'] . ' ' . $c['year']) ?></td>
-                            <td><?= (int)$c['minimum_events_required'] ?></td>
-                            <td><?= htmlspecialchars($c['professors'] ?: '—') ?></td>
-                            <td>
-                                <!-- Quick assign professor inline -->
-                                <form method="POST" style="display:flex;gap:.5rem;align-items:center;">
-                                    <input type="hidden" name="action"    value="assign_professor">
-                                    <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
-                                    <select name="professor_id" style="padding:.3rem .5rem;border:1px solid #ccc;border-radius:4px;font-size:.85rem;">
-                                        <option value="">-- Prof --</option>
-                                        <?php foreach ($professors as $p): ?>
-                                        <option value="<?= $p['professor_id'] ?>">
-                                            <?= htmlspecialchars($p['fname'] . ' ' . $p['lname']) ?>
-                                        </option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <button type="submit" class="btn-small"><i class="fas fa-link"></i></button>
+            <div class="course-admin-grid">
+                <?php foreach ($courses as $c):
+                    $assigned = $courseAssignments[$c['course_id']] ?? [];
+                ?>
+                <div class="course-admin-card">
+                    <div class="course-admin-card-header">
+                        <div>
+                            <h3><?= htmlspecialchars($c['course_name']) ?></h3>
+                            <span class="badge" style="margin-top:.3rem;display:inline-block;"><?= htmlspecialchars($c['course_id']) ?></span>
+                        </div>
+                        <form method="POST" onsubmit="return confirm('Delete <?= htmlspecialchars(addslashes($c['course_name'])) ?>? This cannot be undone.');">
+                            <input type="hidden" name="action"    value="delete_course">
+                            <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
+                            <button type="submit" class="btn-delete-small" title="Delete course"><i class="fas fa-trash"></i></button>
+                        </form>
+                    </div>
+
+                    <div class="course-admin-meta">
+                        <span><i class="fas fa-users"></i> Section <?= htmlspecialchars($c['section']) ?></span>
+                        <span><i class="fas fa-calendar"></i> <?= htmlspecialchars($c['semester'] . ' ' . $c['year']) ?></span>
+                        <span><i class="fas fa-calendar-check"></i> Min <?= (int)$c['minimum_events_required'] ?> events</span>
+                    </div>
+
+                    <div class="prof-list">
+                        <div class="prof-list-label"><i class="fas fa-chalkboard-teacher"></i> Assigned Professors</div>
+                        <?php if (empty($assigned)): ?>
+                            <span style="color:#aaa;font-size:.85rem;font-style:italic;">No professors assigned</span>
+                        <?php else: foreach ($assigned as $asgn): ?>
+                            <span class="prof-chip">
+                                <i class="fas fa-user"></i>
+                                <?= htmlspecialchars($asgn['prof_name']) ?>
+                                <form method="POST" style="margin:0;display:inline;"
+                                      onsubmit="return confirm('Remove <?= htmlspecialchars(addslashes($asgn['prof_name'])) ?> from <?= htmlspecialchars(addslashes($c['course_id'])) ?>?');">
+                                    <input type="hidden" name="action"       value="remove_professor">
+                                    <input type="hidden" name="course_id"    value="<?= htmlspecialchars($c['course_id']) ?>">
+                                    <input type="hidden" name="professor_id" value="<?= $asgn['professor_id'] ?>">
+                                    <button type="submit" class="prof-chip-remove" title="Remove from course"><i class="fas fa-times"></i></button>
                                 </form>
-                            </td>
-                            <td>
-                                <form method="POST" class="inline" onsubmit="return confirm('Delete course?');">
-                                    <input type="hidden" name="action"    value="delete_course">
-                                    <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
-                                    <button type="submit" class="btn-delete-small"><i class="fas fa-trash"></i></button>
-                                </form>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
+                            </span>
+                        <?php endforeach; endif; ?>
+                    </div>
+
+                    <?php
+                    // Build set of already-assigned professor IDs for this course
+                    $assignedIds = array_column($assigned, 'professor_id');
+                    $unassigned  = array_filter($professors, fn($p) => !in_array($p['professor_id'], $assignedIds));
+                    ?>
+                    <?php if (empty($unassigned)): ?>
+                        <div class="assign-prof-row" style="color:#888;font-size:.85rem;font-style:italic;">
+                            <i class="fas fa-check-circle" style="color:#2e7d32;"></i> All professors already assigned
+                        </div>
+                    <?php else: ?>
+                    <form method="POST" class="assign-prof-row">
+                        <input type="hidden" name="action"    value="assign_professor">
+                        <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
+                        <select name="professor_id" required>
+                            <option value="">— Assign professor —</option>
+                            <?php foreach ($unassigned as $p): ?>
+                            <option value="<?= $p['professor_id'] ?>">
+                                <?= htmlspecialchars($p['fname'] . ' ' . $p['lname']) ?>
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button type="submit" class="btn-small"><i class="fas fa-plus"></i> Assign</button>
+                    </form>
+                    <?php endif; ?>
+                </div>
+                <?php endforeach; ?>
             </div>
             <?php endif; ?>
         </div>

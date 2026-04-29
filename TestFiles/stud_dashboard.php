@@ -75,7 +75,7 @@ try {
         // ── Upcoming events ───────────────────────────────────────────────────
         $now  = date('Y-m-d H:i:s');
         $stmt = $pdo->prepare(
-            "SELECT event_id, event_name, event_type, start_time, end_time, location
+            "SELECT DISTINCT event_id, event_name, event_type, start_time, end_time, location
              FROM Event
              WHERE start_time > ?
              ORDER BY start_time ASC
@@ -88,10 +88,15 @@ try {
         // ── Attendance history ────────────────────────────────────────────────
         $stmt = $pdo->prepare(
             "SELECT ev.event_id, ev.event_name, ev.event_type, ev.start_time, ev.end_time,
-                    ev.location, a.start_scan_time, a.end_scan_time, a.minutes_present, a.audit_note
+                    ev.location,
+                    MIN(a.start_scan_time) AS start_scan_time,
+                    MAX(a.end_scan_time)   AS end_scan_time,
+                    MAX(a.minutes_present) AS minutes_present,
+                    MAX(a.audit_note)      AS audit_note
              FROM AttendsEventSessions a
              JOIN Event ev ON a.event_id = ev.event_id
              WHERE a.student_id = ?
+             GROUP BY ev.event_id, ev.event_name, ev.event_type, ev.start_time, ev.end_time, ev.location
              ORDER BY ev.start_time DESC"
         );
         $stmt->execute([$studentId]);
@@ -235,7 +240,6 @@ $attendanceRate = $totalRequired > 0
                             <th>Date</th>
                             <th>Sign In</th>
                             <th>Sign Out</th>
-                            <th>Duration</th>
                             <th>Status</th>
                         </tr>
                     </thead>
@@ -247,11 +251,6 @@ $attendanceRate = $totalRequired > 0
                             <td><?= date('M j, Y', strtotime($rec['start_time'])) ?></td>
                             <td><?= $rec['start_scan_time'] ? date('g:i A', strtotime($rec['start_scan_time'])) : '—' ?></td>
                             <td><?= $rec['end_scan_time']   ? date('g:i A', strtotime($rec['end_scan_time']))   : '—' ?></td>
-                            <td>
-                                <?php if ($rec['minutes_present'] !== null): ?>
-                                    <?= $rec['minutes_present'] ?> min
-                                <?php else: ?>—<?php endif; ?>
-                            </td>
                             <td>
                                 <?php if ($rec['end_scan_time']): ?>
                                 <span class="status-badge complete"><i class="fas fa-check"></i> Complete</span>

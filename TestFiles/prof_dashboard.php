@@ -45,35 +45,56 @@ $doExport = isset($_GET['export']) && $_GET['export'] === '1' && $selectedCourse
 // ── Handle attendance override POST ──────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'override_attendance') {
     try {
-        $pdo       = getDB();
-        $stuId     = (int)$_POST['student_id'];
-        $evId      = (int)$_POST['event_id'];
-        $courseId  = trim($_POST['course_id'] ?? $selectedCourseId);
-        $startTime = $_POST['start_scan_time'] ?? null;
-        $endTime   = $_POST['end_scan_time']   ?? null;
-        $note      = trim($_POST['audit_note'] ?? '');
+        $pdo            = getDB();
+        $stuId          = (int)$_POST['student_id'];
+        $evId           = (int)$_POST['event_id'];
+        $courseId       = trim($_POST['course_id'] ?? $selectedCourseId);
+        $overrideStatus = $_POST['override_status'] ?? 'present';
+        $note           = trim($_POST['audit_note'] ?? '');
 
-        // Upsert using composite PK: student_id + event_id + course_id
-        $exists = $pdo->prepare(
-            "SELECT 1 FROM AttendsEventSessions WHERE student_id=? AND event_id=? AND course_id=?"
-        );
-        $exists->execute([$stuId, $evId, $courseId]);
-
-        if ($exists->fetch()) {
+        if ($overrideStatus === 'absent') {
+            // Remove the attendance record entirely (no credit)
             $pdo->prepare(
-                "UPDATE AttendsEventSessions
-                 SET start_scan_time=?, end_scan_time=?, audit_note=?, overridden_by=?
-                 WHERE student_id=? AND event_id=? AND course_id=?"
-            )->execute([$startTime ?: null, $endTime ?: null, $note, $profId,
-                        $stuId, $evId, $courseId]);
+                "DELETE FROM AttendsEventSessions WHERE student_id=? AND event_id=? AND course_id=?"
+            )->execute([$stuId, $evId, $courseId]);
+            $_SESSION['flash_message'] = 'Attendance removed — student marked absent.';
+            $_SESSION['flash_type']    = 'success';
         } else {
-            $pdo->prepare(
-                "INSERT INTO AttendsEventSessions
-                     (student_id, event_id, course_id, start_scan_time, end_scan_time, audit_note, overridden_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
-            )->execute([$stuId, $evId, $courseId,
-                        $startTime ?: null, $endTime ?: null, $note, $profId]);
+            // Present — use supplied times or default to event start/end
+            $evInfo = $pdo->prepare("SELECT start_time, end_time FROM Event WHERE event_id=? LIMIT 1");
+            $evInfo->execute([$evId]);
+            $evRow = $evInfo->fetch();
+
+            $startTime = ($_POST['start_scan_time'] ?? '') !== ''
+                ? $_POST['start_scan_time'] : ($evRow['start_time'] ?? null);
+            $endTime   = ($_POST['end_scan_time'] ?? '') !== ''
+                ? $_POST['end_scan_time']   : ($evRow['end_time']   ?? null);
+
+            // Upsert using composite PK: student_id + event_id + course_id
+            $exists = $pdo->prepare(
+                "SELECT 1 FROM AttendsEventSessions WHERE student_id=? AND event_id=? AND course_id=?"
+            );
+            $exists->execute([$stuId, $evId, $courseId]);
+
+            if ($exists->fetch()) {
+                $pdo->prepare(
+                    "UPDATE AttendsEventSessions
+                     SET start_scan_time=?, end_scan_time=?, audit_note=?, overridden_by=?
+                     WHERE student_id=? AND event_id=? AND course_id=?"
+                )->execute([$startTime, $endTime, $note, $profId,
+                            $stuId, $evId, $courseId]);
+            } else {
+                $pdo->prepare(
+                    "INSERT INTO AttendsEventSessions
+                         (student_id, event_id, course_id, start_scan_time, end_scan_time, audit_note, overridden_by)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                )->execute([$stuId, $evId, $courseId, $startTime, $endTime, $note, $profId]);
+            }
+            $_SESSION['flash_message'] = 'Attendance override saved — student marked present.';
+            $_SESSION['flash_type']    = 'success';
         }
+        header("Location: ?prof_id={$profId}&course_id=" . urlencode($courseId));
+        exit;
     } catch (PDOException $e) {
         $dbError = $e->getMessage();
     }
@@ -113,85 +134,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     try {
         $pdo = getDB();
         $eventId = (int)$_POST['event_id'];
-        $courseId = trim($_POST['course_id'] ?? '');
         $startTime = $_POST['checkin_time'] ?? date('Y-m-d H:i:s');
         $note = trim($_POST['audit_note'] ?? 'Hackathon check-in by professor');
 
-        if (!$courseId) {
-            $dbError = 'Course must be selected for hackathon check-in.';
+        // Verify event is a hackathon AND has not yet ended
+        $nowCheck   = date('Y-m-d H:i:s');
+        $eventCheck = $pdo->prepare(
+            "SELECT event_type, start_time, end_time FROM Event WHERE event_id = ? LIMIT 1"
+        );
+        $eventCheck->execute([$eventId]);
+        $event = $eventCheck->fetch();
+
+        if (!$event || strtolower($event['event_type']) !== 'hackathon') {
+            $dbError = 'Selected event is not a hackathon.';
+        } elseif ($nowCheck > $event['end_time']) {
+            // Hackathon already ended — check-in not allowed
+            $dbError = 'This hackathon has already ended. Check-in is no longer available.';
         } else {
-            // Verify event is a hackathon AND has not yet ended
-            $nowCheck   = date('Y-m-d H:i:s');
-            $eventCheck = $pdo->prepare(
-                "SELECT event_type, start_time, end_time FROM Event WHERE event_id = ? LIMIT 1"
-            );
-            $eventCheck->execute([$eventId]);
-            $event = $eventCheck->fetch();
+            $eventStartTime = $event['start_time'];
+            $eventEndTime   = $event['end_time'];
 
-            if (!$event || strtolower($event['event_type']) !== 'hackathon') {
-                $dbError = 'Selected event is not a hackathon.';
-            } elseif ($nowCheck > $event['end_time']) {
-                // Hackathon already ended — check-in not allowed
-                $dbError = 'This hackathon has already ended. Check-in is no longer available.';
+            $studentIds = $_POST['student_ids'] ?? [];
+            if (!is_array($studentIds)) $studentIds = [];
+            $studentIds = array_values(array_filter($studentIds, fn($id) => ctype_digit((string)$id)));
+
+            if (empty($studentIds)) {
+                $dbError = 'You must select at least one student for hackathon check-in.';
             } else {
-                $eventStartTime = $event['start_time'];
-                $eventEndTime   = $event['end_time'];
+                // Verify all students exist
+                $placeholders = implode(',', array_fill(0, count($studentIds), '?'));
+                $verifyStmt = $pdo->prepare("SELECT student_id FROM Student WHERE student_id IN ($placeholders)");
+                $verifyStmt->execute($studentIds);
+                $validStudents = $verifyStmt->fetchAll(PDO::FETCH_COLUMN);
 
-                $studentIds = $_POST['student_ids'] ?? [];
-                if (!is_array($studentIds)) $studentIds = [];
-                $studentIds = array_values(array_filter($studentIds, fn($id) => ctype_digit((string)$id)));
-
-                if (empty($studentIds)) {
-                    $dbError = 'You must select at least one student for hackathon check-in.';
+                if (count($validStudents) !== count($studentIds)) {
+                    $dbError = 'Some selected students do not exist.';
                 } else {
-                    $placeholders = implode(',', array_fill(0, count($studentIds), '?'));
-                    $params       = array_merge([$courseId], $studentIds);
-
-                    $stmt = $pdo->prepare(
-                        "SELECT s.student_id
-                         FROM Student s
-                         JOIN EnrollmentInCourses e ON s.student_id = e.student_id
-                         WHERE e.course_id = ? AND e.status = 'active'
-                         AND s.student_id IN ($placeholders)"
+                    // For each student, insert attendance records for ALL their active enrolled courses
+                    $insertStmt = $pdo->prepare(
+                        "INSERT INTO AttendsEventSessions
+                             (student_id, event_id, course_id, start_scan_time,
+                              end_scan_time, audit_note, overridden_by)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE
+                             start_scan_time = VALUES(start_scan_time),
+                             end_scan_time   = VALUES(end_scan_time),
+                             audit_note      = VALUES(audit_note),
+                             overridden_by   = VALUES(overridden_by)"
                     );
-                    $stmt->execute($params);
-                    $students = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-                    if (empty($students)) {
-                        $dbError = 'No selected students found for this course.';
-                    } elseif (count($students) !== count($studentIds)) {
-                        $dbError = 'Some selected students are not active in this course.';
-                    } else {
-                        // Use event start_time/end_time so minutes_present is calculated
-                        // and the attendance grid column updates to show full credit
-                        $insertStmt = $pdo->prepare(
-                            "INSERT INTO AttendsEventSessions
-                                 (student_id, event_id, course_id, start_scan_time,
-                                  end_scan_time, audit_note, overridden_by)
-                             VALUES (?, ?, ?, ?, ?, ?, ?)
-                             ON DUPLICATE KEY UPDATE
-                                 start_scan_time = VALUES(start_scan_time),
-                                 end_scan_time   = VALUES(end_scan_time),
-                                 audit_note      = VALUES(audit_note),
-                                 overridden_by   = VALUES(overridden_by)"
-                        );
+                    $getCoursesStmt = $pdo->prepare(
+                        "SELECT DISTINCT course_id FROM EnrollmentInCourses 
+                         WHERE student_id = ? AND status = 'active'"
+                    );
 
-                        $count = 0;
-                        foreach ($students as $studentId) {
+                    $count = 0;
+                    foreach ($validStudents as $studentId) {
+                        // Get all courses this student is enrolled in
+                        $getCoursesStmt->execute([$studentId]);
+                        $courses = $getCoursesStmt->fetchAll(PDO::FETCH_COLUMN);
+
+                        // Insert attendance for each course
+                        foreach ($courses as $courseId) {
                             $insertStmt->execute([
                                 $studentId, $eventId, $courseId,
                                 $eventStartTime, $eventEndTime, $note, $profId
                             ]);
-                            $count++;
                         }
-
-                        $_SESSION['flash_message'] = "Hackathon check-in completed for {$count} student(s). "
-                            . "Their attendance is now reflected in the course table below.";
-                        $_SESSION['flash_type'] = 'success';
-                        // Redirect back to this course so the professor sees updated attendance
-                        header("Location: ?prof_id={$profId}&course_id=" . urlencode($courseId));
-                        exit;
+                        $count++;
                     }
+
+                    $_SESSION['flash_message'] = "Hackathon check-in completed for {$count} student(s). "
+                        . "Their attendance is now reflected across all their enrolled courses.";
+                    $_SESSION['flash_type'] = 'success';
+                    header("Location: ?prof_id={$profId}");
+                    exit;
                 }
             }
         }
@@ -200,7 +217,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// ── DELETE EVENT ─────────────────────────────────────────────────────────────
+// ── DELETE EVENT ──────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_event') {
     try {
         $pdo = getDB();
@@ -214,11 +231,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         if (!$event) {
             $dbError = 'Event not found or you do not have permission to delete it.';
         } else {
-            // Delete the event (cascade will handle attendance records)
+            // Delete the event AND all associated attendance records (cascade delete)
+            // First delete all attendance records for this event
+            $pdo->prepare(
+                "DELETE FROM AttendsEventSessions WHERE event_id = ?"
+            )->execute([$eventId]);
+            
+            // Then delete the event itself
             $deleteStmt = $pdo->prepare("DELETE FROM Event WHERE event_id = ?");
             $deleteStmt->execute([$eventId]);
 
-            $_SESSION['flash_message'] = 'Event "' . $event['event_name'] . '" deleted successfully.';
+            $_SESSION['flash_message'] = 'Event "' . htmlspecialchars($event['event_name']) . '" deleted successfully. All attendance records for this event have been removed.';
             $_SESSION['flash_type'] = 'success';
             header("Location: ?prof_id={$profId}");
             exit;
@@ -227,6 +250,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $dbError = $e->getMessage();
     }
 }
+
+
+// ── REMOVE PROFESSOR FROM COURSE ─────────────────────────────────────────────
+// DISABLED: Only admins can remove courses from assignments
+/*
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'remove_from_course') {
+    try {
+        $pdo      = getDB();
+        $courseId = trim($_POST['course_id'] ?? '');
+        if ($courseId) {
+            // Verify assignment exists first
+            $check = $pdo->prepare(
+                "SELECT assignment_id FROM CourseAssignment WHERE course_id=? AND professor_id=? LIMIT 1"
+            );
+            $check->execute([$courseId, $profId]);
+            if ($check->fetch()) {
+                $pdo->prepare(
+                    "DELETE FROM CourseAssignment WHERE course_id=? AND professor_id=?"
+                )->execute([$courseId, $profId]);
+                $_SESSION['flash_message'] = "You have been removed from course {}.";
+                $_SESSION['flash_type']    = 'success';
+            } else {
+                $_SESSION['flash_message'] = 'Course assignment not found.';
+                $_SESSION['flash_type']    = 'error';
+            }
+        }
+        header("Location: ?prof_id={$profId}");
+        exit;
+    } catch (PDOException $e) {
+        $dbError = $e->getMessage();
+    }
+}
+*/
 
 // ── AJAX: GET COURSE STUDENTS ────────────────────────────────────────────────
 if (isset($_GET['action']) && $_GET['action'] === 'get_course_students') {
@@ -254,6 +310,37 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_course_students') {
         echo json_encode(['students' => $students]);
     } catch (PDOException $e) {
         echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+    }
+    exit;
+}
+
+// ── AJAX: GET ALL STUDENTS FROM ALL PROFESSOR'S COURSES ──────────────────────
+if (isset($_GET['action']) && $_GET['action'] === 'get_all_prof_students') {
+    header('Content-Type: application/json');
+    try {
+        $pdo = getDB();
+        $profId = (int)($_GET['prof_id'] ?? 0);
+
+        if (!$profId) {
+            echo json_encode(['ok' => false, 'error' => 'Professor ID required']);
+            exit;
+        }
+
+        // Get ALL distinct students from ALL professor's courses
+        $stmt = $pdo->prepare(
+            "SELECT DISTINCT s.student_id, s.fname, s.lname
+             FROM Student s
+             JOIN EnrollmentInCourses e ON s.student_id = e.student_id
+             JOIN CourseAssignment ca ON e.course_id = ca.course_id
+             WHERE ca.professor_id = ? AND e.status = 'active'
+             ORDER BY s.lname, s.fname"
+        );
+        $stmt->execute([$profId]);
+        $students = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        echo json_encode(['ok' => true, 'students' => $students]);
+    } catch (PDOException $e) {
+        echo json_encode(['ok' => false, 'error' => 'Database error: ' . $e->getMessage()]);
     }
     exit;
 }
@@ -409,18 +496,52 @@ try {
                     $attended = (int)$aStmt->fetchColumn();
                 }
 
-                $min    = (int)$selectedCourse['minimum_events_required'];
-                $pct    = $min > 0 ? round($attended / $min * 100) : 0;
-                $status = $attended >= $min && $min > 0 ? 'Excellent'
+                $min = (int)$selectedCourse['minimum_events_required'];
+                
+                // Separate required vs extra credit
+                // Required = min(attended, minimum_required)
+                // Extra = max(0, attended - minimum_required)
+                $requiredAttended = min($attended, $min);
+                $extraAttended = max(0, $attended - $min);
+                
+                // Percentage capped at 100%
+                $pct = $min > 0 ? min(100, round($requiredAttended / $min * 100)) : 0;
+                $status = $requiredAttended >= $min && $min > 0 ? 'Excellent'
                         : ($pct >= 50 ? 'Fair' : 'Poor');
 
                 $courseStudents[] = $stu + [
-                    'events_attended' => $attended,
-                    'events_total'    => $min,  // Changed to minimum required
+                    'events_attended' => $requiredAttended,
+                    'extra_attended'  => $extraAttended,
+                    'events_total'    => $min,
                     'pct'             => $pct,
-                    'meets'           => $attended >= $min,
+                    'meets'           => $requiredAttended >= $min,
                     'status_label'    => $min === 0 ? '—' : $status,
                 ];
+            }
+
+            // ── Bulk-fetch attended event details for all students in one query ──
+            // Keyed by student_id so the table can expand inline per row.
+            $studentEventDetails = [];
+            if (!empty($courseStudents)) {
+                $stuIds      = array_column($courseStudents, 'student_id');
+                $placeholders = implode(',', array_fill(0, count($stuIds), '?'));
+                $detailParams = array_merge($stuIds, [$selectedCourseId]);
+                $detailStmt  = $pdo->prepare(
+                    "SELECT a.student_id, ev.event_name, ev.event_type,
+                            ev.start_time AS event_start, ev.end_time AS event_end,
+                            a.start_scan_time, a.end_scan_time, a.minutes_present,
+                            a.overridden_by, a.audit_note
+                     FROM AttendsEventSessions a
+                     JOIN Event ev ON a.event_id = ev.event_id
+                     WHERE a.student_id IN ($placeholders)
+                       AND a.course_id = ?
+                       AND a.end_scan_time IS NOT NULL
+                     ORDER BY ev.start_time DESC"
+                );
+                $detailStmt->execute($detailParams);
+                foreach ($detailStmt->fetchAll() as $row) {
+                    $studentEventDetails[$row['student_id']][] = $row;
+                }
             }
         }
     }
@@ -431,15 +552,60 @@ try {
 
 // ── CSV export (sends file download, exits) ───────────────────────────────────
 if ($doExport && !$dbError && $selectedCourse) {
+    $exportCourseId   = $selectedCourse['course_id'];
+    $exportCourseName = $selectedCourse['course_name'];
+    $exportSection    = $selectedCourse['section'];
+    $exportSemester   = $selectedCourse['semester'];
+    $exportYear       = $selectedCourse['year'];
+    $exportMinReq     = (int)$selectedCourse['minimum_events_required'];
+    $safeFilename     = preg_replace('/[^A-Za-z0-9_\-]/', '_', $exportCourseId);
+
     header('Content-Type: text/csv');
-    header('Content-Disposition: attachment; filename="' . $selectedCourseId . '_attendance.csv"');
+    header('Content-Disposition: attachment; filename="' . $safeFilename . '_attendance_' . date('Y-m-d') . '.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['Student ID','First Name','Last Name','Email','Year','Events Attended','Minimum Required','% Rate','Meets Requirement','Status']);
+
+    // Header block matching professor's expected format
+    fputcsv($out, ['Course:', $exportCourseId . ' - ' . $exportCourseName]);
+    fputcsv($out, ['Section:', $exportSection]);
+    fputcsv($out, ['Term:', $exportSemester . ' ' . $exportYear]);
+    fputcsv($out, ['Minimum Events Required:', $exportMinReq]);
+    fputcsv($out, ['Export Date:', date('F j, Y')]);
+    fputcsv($out, []); // blank row
+
+    // Column headers — mirror the roster format (Select, ID, Name, ...)
+    // plus appended attendance columns so it can be used alongside the original roster
+    fputcsv($out, [
+        'Select',           // blank — matches roster column 1
+        'ID',               // student_id
+        'Name',             // Last, First — matches roster "Name" format
+        'Grade Basis',      // blank — matches roster column 4
+        'Units',            // blank — matches roster column 5
+        'Program and Plan', // year/level — matches roster column 6
+        'Level',            // blank — matches roster column 7
+        'Exp. Grad Term',   // blank — matches roster column 8
+        // Attendance columns appended after roster columns
+        'Events Attended',
+        'Minimum Required',
+        'Attendance %',
+        'Meets Requirement',
+        'Standing',
+    ]);
+
     foreach ($courseStudents as $s) {
         fputcsv($out, [
-            $s['student_id'], $s['fname'], $s['lname'], $s['email'], $s['year'],
-            $s['events_attended'], $s['events_total'], $s['pct'] . '%',
-            $s['meets'] ? 'Yes' : 'No', $s['status_label'],
+            '',                                        // Select (blank)
+            $s['student_id'],                          // ID
+            $s['lname'] . ', ' . $s['fname'],          // Name (Last, First)
+            '',                                        // Grade Basis (blank)
+            '',                                        // Units (blank)
+            $s['year'],                                // Program and Plan (student year)
+            '',                                        // Level (blank)
+            '',                                        // Exp. Grad Term (blank)
+            $s['events_attended'],
+            $exportMinReq,
+            $s['pct'] . '%',
+            $s['meets'] ? 'Yes' : 'No',
+            $s['status_label'],
         ]);
     }
     fclose($out);
@@ -487,10 +653,10 @@ if ($doExport && !$dbError && $selectedCourse) {
             <h1><i class="fas fa-chalkboard-teacher"></i> Professor Dashboard</h1>
             <p class="subtitle" style="text-decoration:none;">Select a class to view student attendance</p>
             <div class="dashboard-action-row" style="margin-top:1rem; display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
-                <a href="attendance.php?prof_id=<?= $profId ?>" class="btn-primary" target="_blank" style="text-decoration:none;">
-                    <i class="fas fa-id-card"></i> Open Student Check-In Form
-                </a>
-                <button class="btn-secondary" onclick="openHackathonCheckinModal()" style="text-decoration:none;">
+                <!-- <a href="attendance.php?prof_id=<?= $profId ?>" class="btn-primary" target="_blank" style="text-decoration:none;">
+                    <i class="fas fa-id-card"></i> Colloquium Attendance Form
+                </a> -->
+                <button class="btn-secondary" onclick="openHackathonCheckinModal()" style="background: #003366; color: white; font-weight: 600; padding: 0.75rem 1.5rem;">
                     <i class="fas fa-users"></i> Hackathon Check-in
                 </button>
                 <span style="color:#555; font-size:.95rem; text-decoration:none;">Open on department tablet for student check-in/out during events.</span>
@@ -557,45 +723,69 @@ if ($doExport && !$dbError && $selectedCourse) {
                     </thead>
                     <tbody>
                         <?php
-                        // Get recent events created by this professor or all events if admin permissions
-                        $stmt = $pdo->prepare(
-                            "SELECT event_id, event_name, event_type, start_time, end_time, location, created_by
-                             FROM Event
-                             WHERE created_by = ? OR ? = 1
-                             ORDER BY start_time DESC
-                             LIMIT 10"
+                        // Fetch events with creator name via JOIN — fixes the "created by you" bug
+                        $evStmt2 = $pdo->prepare(
+                            "SELECT e.event_id, e.event_name, e.event_type, e.start_time, e.end_time,
+                                    e.location, e.created_by,
+                                    CONCAT(u.fname, ' ', u.lname) AS creator_name,
+                                    u.role AS creator_role
+                             FROM Event e
+                             LEFT JOIN AppUser u ON u.user_id = e.created_by
+                             ORDER BY e.start_time DESC
+                             LIMIT 20"
                         );
-                        $stmt->execute([$profId, 1]); // 1 for potential admin check, but for now just professor's events
-                        $recentEvents = $stmt->fetchAll();
-                        
-                        if (empty($recentEvents)): ?>
+                        $evStmt2->execute([]);
+                        $recentEvents = $evStmt2->fetchAll();
+                        ?>
+                        <?php if (empty($recentEvents)): ?>
                         <tr>
                             <td colspan="5" class="no-data">
                                 <i class="fas fa-calendar-times"></i> No events created yet. Click "Create Event" to get started.
                             </td>
                         </tr>
-                        <?php else: 
-                            foreach ($recentEvents as $event): ?>
+                        <?php else:
+                            foreach ($recentEvents as $event):
+                                $isMyEvent = ((int)$event['created_by'] === $profId);
+                        ?>
                         <tr>
                             <td><?= htmlspecialchars($event['event_name']) ?></td>
                             <td>
                                 <span class="badge"><?= htmlspecialchars($event['event_type']) ?></span>
                             </td>
                             <td>
-                                <?= date('M j, Y', strtotime($event['start_time'])) ?><br>
-                                <small><?= date('g:i A', strtotime($event['start_time'])) ?> - <?= date('g:i A', strtotime($event['end_time'])) ?></small>
+                                <?= date('D, M j, Y', strtotime($event['start_time'])) ?><br>
+                                <small><?= date('g:i A', strtotime($event['start_time'])) ?> &ndash; <?= date('g:i A', strtotime($event['end_time'])) ?></small>
                             </td>
                             <td><?= htmlspecialchars($event['location']) ?></td>
                             <td>
-                                <em>Created by you</em>
-                                <div style="margin-top: 5px;">
+                                <?php if ($isMyEvent): ?>
+                                    <span style="color:#2e7d32;font-size:.82rem;"><i class="fas fa-user-check"></i> You</span>
+                                <?php elseif ($event['creator_name']): ?>
+                                    <span style="color:#555;font-size:.82rem;"><i class="fas fa-user"></i> <?= htmlspecialchars($event['creator_name']) ?></span>
+                                <?php else: ?>
+                                    <span style="color:#aaa;font-size:.82rem;">—</span>
+                                <?php endif; ?>
+                                <div style="margin-top:5px;display:flex;gap:0.4rem;">
+                                    <?php 
+                                    $isColloquium = strtolower($event['event_type']) === 'colloquium';
+                                    $eventEndTime = strtotime($event['end_time']);
+                                    // Link available until 10 minutes AFTER event ends (check-out window)
+                                    $isActive = ($eventEndTime + (10 * 60)) > time();
+                                    ?>
+                                    <?php if ($isColloquium && $isActive): ?>
+                                    <a href="attendance.php?event_id=<?= $event['event_id'] ?>&prof_id=<?= $profId ?>" class="btn-small btn-primary" target="_blank">
+                                        <i class="fas fa-link"></i> Colloquium Attendance Form
+                                    </a>
+                                    <?php endif; ?>
+                                    <?php if ($isMyEvent): ?>
                                     <button class="btn-small btn-danger" onclick="deleteEvent(<?= $event['event_id'] ?>, '<?= htmlspecialchars(addslashes($event['event_name'])) ?>')">
                                         <i class="fas fa-trash"></i> Delete
                                     </button>
+                                    <?php endif; ?>
                                 </div>
                             </td>
                         </tr>
-                        <?php endforeach; 
+                        <?php endforeach;
                         endif; ?>
                     </tbody>
                 </table>
@@ -607,18 +797,21 @@ if ($doExport && !$dbError && $selectedCourse) {
             <h2>Your Classes</h2>
             <div class="course-grid">
                 <?php foreach ($courses as $course): ?>
-                <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($course['course_id']) ?>"
-                   class="course-card <?= $selectedCourseId === $course['course_id'] ? 'selected' : '' ?>">
-                    <div class="course-header">
-                        <span class="course-code"><?= htmlspecialchars($course['course_id']) ?></span>
-                        <span class="course-semester"><?= htmlspecialchars($course['semester'] . ' ' . $course['year']) ?></span>
-                    </div>
-                    <h3 class="course-name"><?= htmlspecialchars($course['course_name']) ?></h3>
-                    <div class="course-stats">
-                        <span><i class="fas fa-user-graduate"></i> Students <?= $course['student_count'] ?></span>
-                        <span><i class="fas fa-calendar-check"></i> Min Required: <?= $course['minimum_events_required'] ?></span>
-                    </div>
-                </a>
+                <div class="course-card-wrapper" style="position:relative;">
+                    <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($course['course_id']) ?>"
+                       class="course-card <?= $selectedCourseId === $course['course_id'] ? 'selected' : '' ?>">
+                        <div class="course-header">
+                            <span class="course-code"><?= htmlspecialchars($course['course_id']) ?></span>
+                            <span class="course-semester"><?= htmlspecialchars($course['semester'] . ' ' . $course['year']) ?></span>
+                        </div>
+                        <h3 class="course-name"><?= htmlspecialchars($course['course_name']) ?></h3>
+                        <div class="course-stats">
+                            <span><i class="fas fa-user-graduate"></i> Students <?= $course['student_count'] ?></span>
+                            <span><i class="fas fa-calendar-check"></i> Min Required: <?= $course['minimum_events_required'] ?></span>
+                        </div>
+                    </a>
+                    <!-- Leave Course button removed - only admins can remove courses -->
+                </div>
                 <?php endforeach; ?>
 
                 <?php if (empty($courses)): ?>
@@ -678,33 +871,58 @@ if ($doExport && !$dbError && $selectedCourse) {
                 <?php endif; ?>
             </form>
 
-            <!-- Student attendance table matching SRS mockup -->
+            <!-- Student attendance table -->
             <?php if (empty($courseStudents)): ?>
             <p class="no-data"><i class="fas fa-user-slash"></i> No students found.</p>
             <?php else: ?>
+            <style>
+                .event-detail-row { display:none; background:#f8fafc; }
+                .event-detail-row.open { display:table-row; }
+                .event-detail-inner { padding:.75rem 1.25rem 1rem; }
+                .event-detail-inner table { width:100%; font-size:.83rem; border-collapse:collapse; }
+                .event-detail-inner th { text-align:left; color:#666; font-weight:600; padding:.3rem .6rem; border-bottom:1px solid #e2e8f0; background:#f1f5f9; }
+                .event-detail-inner td { padding:.35rem .6rem; border-bottom:1px solid #eef2f7; vertical-align:middle; }
+                .event-detail-inner tr:last-child td { border-bottom:none; }
+                .toggle-events-btn { background:none; border:1px solid #c7d2fe; color:#4338ca; border-radius:6px; padding:.2rem .55rem; font-size:.78rem; cursor:pointer; transition:background .15s,color .15s; white-space:nowrap; }
+                .toggle-events-btn:hover { background:#eef2ff; }
+                .toggle-events-btn.open { background:#eef2ff; border-color:#6366f1; }
+                .credit-yes { color:#2e7d32; font-weight:600; }
+                .credit-no  { color:#c62828; }
+            </style>
             <div class="table-container">
                 <table class="students-table">
                     <thead>
                         <tr>
                             <th>Student Name</th>
                             <th>Email</th>
-                            <th>Events Attended</th>
+                            <th>Required</th>
+                            <th>Extra</th>
                             <th>Attendance Rate</th>
                             <th>Status</th>
-                            <th>Override</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($courseStudents as $stu): ?>
+                        <?php foreach ($courseStudents as $stu):
+                            $evDetails = $studentEventDetails[$stu['student_id']] ?? [];
+                            $detailRowId = 'evdetail-' . $stu['student_id'];
+                        ?>
                         <tr>
                             <td>
                                 <?= htmlspecialchars($stu['fname'] . ' ' . $stu['lname']) ?>
-                                <small style="color:#888;display:block;">ID: <?= $stu['student_id'] ?></small>
+                                <!-- <small style="color:#888;display:block;">ID: <?= $stu['student_id'] ?></small> -->
                             </td>
                             <td><?= htmlspecialchars($stu['email']) ?></td>
                             <td>
                                 <span class="attendance-count"><?= $stu['events_attended'] ?></span>
                                 / <?= $stu['events_total'] ?>
+                            </td>
+                            <td>
+                                <?php if ($stu['extra_attended'] > 0): ?>
+                                    <span class="attendance-count" style="color:#d97706; font-weight:600;">+<?= $stu['extra_attended'] ?></span>
+                                <?php else: ?>
+                                    <span style="color:#999;">—</span>
+                                <?php endif; ?>
                             </td>
                             <td>
                                 <strong><?= $stu['pct'] ?>%</strong>
@@ -720,12 +938,84 @@ if ($doExport && !$dbError && $selectedCourse) {
                                 ?>
                                 <span class="status-badge <?= $cls ?>"><?= $label ?></span>
                             </td>
-                            <td>
-                                <!-- Override button opens modal for audited correction -->
+                            <td style="white-space:nowrap;display:flex;gap:.4rem;align-items:center;">
+                                <!-- View attended events -->
+                                <button class="toggle-events-btn"
+                                        onclick="toggleEvents('<?= $detailRowId ?>', this)"
+                                        title="View attended events">
+                                    <i class="fas fa-eye"></i> Show
+                                </button>
+                                <!-- Override -->
                                 <button class="btn-small"
-                                        onclick="openOverride(<?= $stu['student_id'] ?>, '<?= htmlspecialchars(addslashes($stu['fname'].' '.$stu['lname'])) ?>')">
+                                        onclick="openOverride(<?= $stu['student_id'] ?>, '<?= htmlspecialchars(addslashes($stu['fname'].' '.$stu['lname'])) ?>')"
+                                        title="Override attendance">
                                     <i class="fas fa-edit"></i>
                                 </button>
+                            </td>
+                        </tr>
+                        <!-- Expandable event detail row -->
+                        <tr id="<?= $detailRowId ?>" class="event-detail-row">
+                            <td colspan="6">
+                                <div class="event-detail-inner">
+                                <?php if (empty($evDetails)): ?>
+                                    <p style="color:#888;font-size:.85rem;margin:0;"><i class="fas fa-calendar-times"></i> No completed attendance records for this student.</p>
+                                <?php else: ?>
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>Event</th>
+                                                <th>Type</th>
+                                                <th>Date</th>
+                                                <th>Check-In</th>
+                                                <th>Check-Out</th>
+                                                <!-- <th>Duration</th> -->
+                                                <th>Status</th>
+                                                <th>Credit</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                        <?php foreach ($evDetails as $ed):
+                                            // Credit is given if:
+                                            // 1. Overridden by professor, OR
+                                            // 2. Checked in within 10 min BEFORE to 5 min AFTER event start AND checked out at/after event end
+                                            $hasCredit = $ed['overridden_by'] !== null
+                                                || (strtotime($ed['start_scan_time']) >= strtotime($ed['event_start']) - 10*60
+                                                    && strtotime($ed['start_scan_time']) <= strtotime($ed['event_start']) + 5*60
+                                                    && strtotime($ed['end_scan_time']) >= strtotime($ed['event_end']));
+                                        ?>
+                                            <tr>
+                                                <td><?= htmlspecialchars($ed['event_name']) ?></td>
+                                                <td><span class="type-badge"><?= htmlspecialchars($ed['event_type']) ?></span></td>
+                                                <td><?= date('M j, Y', strtotime($ed['event_start'])) ?></td>
+                                                <td><?= date('g:i A', strtotime($ed['start_scan_time'])) ?></td>
+                                                <td><?= date('g:i A', strtotime($ed['end_scan_time'])) ?></td>
+                                                <!-- <td><?= $ed['minutes_present'] !== null ? $ed['minutes_present'].' min' : '—' ?></td> -->
+                                                <td>
+                                                    <!-- Status: Complete/Partial/Incomplete (consistent with student dashboard) -->
+                                                    <?php if ($ed['end_scan_time']): ?>
+                                                        <span class="status-badge complete"><i class="fas fa-check"></i> Complete</span>
+                                                    <?php elseif ($ed['start_scan_time']): ?>
+                                                        <span class="status-badge partial"><i class="fas fa-clock"></i> Partial</span>
+                                                    <?php else: ?>
+                                                        <span class="status-badge incomplete"><i class="fas fa-times"></i> Incomplete</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($hasCredit): ?>
+                                                        <span class="credit-yes"><i class="fas fa-check-circle"></i> Yes</span>
+                                                    <?php else: ?>
+                                                        <span class="credit-no"><i class="fas fa-times-circle"></i> No</span>
+                                                    <?php endif; ?>
+                                                    <?php if ($ed['audit_note']): ?>
+                                                        <span title="<?= htmlspecialchars($ed['audit_note']) ?>" style="color:#aaa;font-size:.75rem;margin-left:.3rem;cursor:help;"><i class="fas fa-info-circle"></i></span>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                        </tbody>
+                                    </table>
+                                <?php endif; ?>
+                                </div>
                             </td>
                         </tr>
                         <?php endforeach; ?>
@@ -746,10 +1036,9 @@ if ($doExport && !$dbError && $selectedCourse) {
                 <h3>Override Attendance – <span id="overrideStudentName"></span></h3>
                 <button class="modal-close" onclick="closeModal('overrideModal')">&times;</button>
             </div>
-            <form method="POST">
+            <form method="POST" action="?prof_id=<?= $profId ?>&course_id=<?= urlencode($selectedCourseId) ?>">
                 <input type="hidden" name="action"     value="override_attendance">
                 <input type="hidden" name="student_id" id="overrideStudentId">
-                <!-- Keep course_id and prof_id in URL so page reloads correctly -->
                 <input type="hidden" name="prof_id"    value="<?= $profId ?>">
                 <input type="hidden" name="course_id"  value="<?= htmlspecialchars($selectedCourseId) ?>">
 
@@ -759,20 +1048,37 @@ if ($doExport && !$dbError && $selectedCourse) {
                         <option value="">-- Select Event --</option>
                         <?php foreach ($allEvents ?? [] as $ev): ?>
                         <option value="<?= $ev['event_id'] ?>">
-                            <?= htmlspecialchars($ev['event_name'] . ' (' . date('M j Y', strtotime($ev['start_time'])) . ')') ?>
+                            <?= htmlspecialchars($ev['event_name'] . ' (' . date('M j, Y', strtotime($ev['start_time'])) . ')') ?>
                         </option>
                         <?php endforeach; ?>
                     </select>
                 </div>
 
-                <div class="form-row">
+                <!-- Present / Absent toggle -->
+                <div class="form-group">
+                    <label>Mark Student As</label>
+                    <div style="display:flex;gap:1rem;margin-top:.4rem;">
+                        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-weight:normal;">
+                            <input type="radio" name="override_status" value="present"
+                                   checked onchange="toggleOverrideTimes(this.value)">
+                            <span style="color:#2e7d32;"><i class="fas fa-check-circle"></i> Present (grant credit)</span>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-weight:normal;">
+                            <input type="radio" name="override_status" value="absent"
+                                   onchange="toggleOverrideTimes(this.value)">
+                            <span style="color:#c62828;"><i class="fas fa-times-circle"></i> Absent (remove credit)</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div id="overrideTimeFields" class="form-row">
                     <div class="form-group">
-                        <label>Sign-In Time</label>
-                        <input type="datetime-local" name="start_scan_time">
+                        <label>Sign-In Time <small style="color:#888;">(optional)</small></label>
+                        <input type="datetime-local" name="start_scan_time" id="overrideStartTime">
                     </div>
                     <div class="form-group">
-                        <label>Sign-Out Time</label>
-                        <input type="datetime-local" name="end_scan_time">
+                        <label>Sign-Out Time <small style="color:#888;">(optional)</small></label>
+                        <input type="datetime-local" name="end_scan_time" id="overrideEndTime">
                     </div>
                 </div>
 
@@ -791,20 +1097,22 @@ if ($doExport && !$dbError && $selectedCourse) {
 
     <!-- ── Create Event Modal ── -->
     <div id="createEventModal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content" style="max-width:780px;width:95vw;">
             <div class="modal-header">
-                <h3>Create New Event</h3>
+                <h3><i class="fas fa-calendar-plus"></i> Create New Event</h3>
                 <button class="modal-close" onclick="closeModal('createEventModal')">&times;</button>
             </div>
             <form method="POST">
                 <input type="hidden" name="action" value="create_event">
                 <input type="hidden" name="prof_id" value="<?= $profId ?>">
 
+                <!-- Row 1: Name spans full width -->
                 <div class="form-group">
                     <label>Event Name *</label>
-                    <input type="text" name="event_name" required placeholder="e.g., Spring Colloquium 2024">
+                    <input type="text" name="event_name" required placeholder="e.g., Spring Colloquium 2025">
                 </div>
 
+                <!-- Row 2: Type + Location side by side -->
                 <div class="form-row">
                     <div class="form-group">
                         <label>Event Type</label>
@@ -822,6 +1130,7 @@ if ($doExport && !$dbError && $selectedCourse) {
                     </div>
                 </div>
 
+                <!-- Row 3: Start + End side by side -->
                 <div class="form-row">
                     <div class="form-group">
                         <label>Start Time *</label>
@@ -835,7 +1144,7 @@ if ($doExport && !$dbError && $selectedCourse) {
 
                 <div class="form-actions">
                     <button type="button" class="btn-secondary" onclick="closeModal('createEventModal')">Cancel</button>
-                    <button type="submit" class="btn-primary">Create Event</button>
+                    <button type="submit" class="btn-primary"><i class="fas fa-plus"></i> Create Event</button>
                 </div>
             </form>
         </div>
@@ -846,6 +1155,16 @@ if ($doExport && !$dbError && $selectedCourse) {
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
     window.onclick = e => { if (e.target.classList.contains('modal')) e.target.classList.remove('active'); };
 
+    // Toggle the expandable event detail row for a student
+    function toggleEvents(rowId, btn) {
+        const row = document.getElementById(rowId);
+        const isOpen = row.classList.toggle('open');
+        btn.classList.toggle('open', isOpen);
+        btn.innerHTML = isOpen
+            ? '<i class="fas fa-eye-slash"></i> Hide'
+            : '<i class="fas fa-eye"></i> Show';
+    }
+
     // Pre-populate the override modal with the selected student
     function openOverride(studentId, studentName) {
         document.getElementById('overrideStudentId').value   = studentId;
@@ -853,58 +1172,97 @@ if ($doExport && !$dbError && $selectedCourse) {
         openModal('overrideModal');
     }
 
-    // Hackathon student selection support
-    function openHackathonCheckinModal() {
-        openModal('hackathonCheckinModal');
+    // Delete event with confirmation and cascade deletion of attendance records
+    function deleteEvent(eventId, eventName) {
+        if (confirm(`Are you sure you want to delete "${eventName}"?\n\nThis will also remove all attendance records for this event and cannot be undone.`)) {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.style.display = 'none';
+            const a = document.createElement('input'); a.name = 'action'; a.value = 'delete_event'; form.appendChild(a);
+            const e = document.createElement('input'); e.name = 'event_id'; e.value = eventId; form.appendChild(e);
+            document.body.appendChild(form);
+            form.submit();
+        }
     }
 
-    function updateHackathonStudentList() {
-        const courseSelect = document.querySelector('#hackathonCheckinModal select[name="course_id"]');
-        const studentGroup = document.getElementById('hackathonStudentSelection');
-        const studentList = document.getElementById('hackathonStudentList');
-        const courseId = courseSelect.value;
+    function openHackathonCheckinModal() {
+        openModal('hackathonCheckinModal');
+        loadAllHackathonStudents();
+    }
 
-        studentList.innerHTML = '';
-        if (!courseId) {
-            studentGroup.style.display = 'none';
+    function loadAllHackathonStudents() {
+        const studentList = document.getElementById('hackathonStudentList');
+        const searchInput = document.getElementById('hackathonStudentSearch');
+        
+        // Get prof_id from current URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const profId = urlParams.get('prof_id');
+        
+        if (!profId) {
+            studentList.innerHTML = '<p class="form-note" style="color:#c62828;"><i class="fas fa-exclamation-circle"></i> Error: Professor ID not found. Refresh the page.</p>';
             return;
         }
+        
+        studentList.innerHTML = '<p class="form-note"><i class="fas fa-spinner fa-spin"></i> Loading students...</p>';
+        searchInput.value = '';
 
-        fetch(`?action=get_course_students&course_id=${encodeURIComponent(courseId)}`)
-            .then(response => response.json())
+        fetch(`?prof_id=${profId}&action=get_all_prof_students`)
+            .then(response => {
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                return response.json();
+            })
             .then(data => {
-                if (!data.students || !data.students.length) {
-                    studentList.innerHTML = '<p class="form-note">No active students found for this course.</p>';
-                    studentGroup.style.display = 'block';
+                if (!data.ok) {
+                    studentList.innerHTML = `<p class="form-note" style="color:#c62828;"><i class="fas fa-exclamation-circle"></i> Error: ${data.error || 'Unable to load students.'}</p>`;
+                    return;
+                }
+                
+                if (!data.students || data.students.length === 0) {
+                    studentList.innerHTML = '<p class="form-note">No students found across your courses.</p>';
                     return;
                 }
 
-                studentGroup.style.display = 'block';
+                studentList.innerHTML = '';
                 data.students.forEach(student => {
                     const row = document.createElement('div');
                     row.className = 'checkbox-row';
+                    row.setAttribute('data-student-name', (student.fname + ' ' + student.lname).toLowerCase());
+                    row.setAttribute('data-student-id', student.student_id);
                     row.innerHTML = `
-                        <label>
-                            <input type="checkbox" name="student_ids[]" value="${student.student_id}">
-                            ${student.fname} ${student.lname} (${student.student_id})
+                        <label style="display:flex; align-items:center; gap:0.75rem; margin:0.75rem 0; cursor:pointer; font-weight:normal;">
+                            <input type="checkbox" name="student_ids[]" value="${student.student_id}" style="width:20px; height:20px; cursor:pointer;">
+                            <span>${student.fname} ${student.lname} (ID: ${student.student_id})</span>
                         </label>
                     `;
                     studentList.appendChild(row);
                 });
             })
-            .catch(() => {
-                studentList.innerHTML = '<p class="form-note">Unable to load students. Refresh and try again.</p>';
-                studentGroup.style.display = 'block';
+            .catch(error => {
+                console.error('Fetch error:', error);
+                studentList.innerHTML = `<p class="form-note" style="color:#c62828;"><i class="fas fa-exclamation-circle"></i> Error: ${error.message}. Refresh and try again.</p>`;
             });
+    }
+
+    function searchHackathonStudents() {
+        const searchInput = document.getElementById('hackathonStudentSearch');
+        const searchTerm = searchInput.value.toLowerCase().trim();
+        const studentRows = document.querySelectorAll('#hackathonStudentList .checkbox-row');
+
+        studentRows.forEach(row => {
+            const name = row.getAttribute('data-student-name');
+            const id = row.getAttribute('data-student-id');
+
+            if (name.includes(searchTerm) || id.includes(searchTerm) || searchTerm === '') {
+                row.style.display = 'block';
+            } else {
+                row.style.display = 'none';
+            }
+        });
     }
 
     // Prevent submitting without selected students
     document.addEventListener('DOMContentLoaded', () => {
         const hackathonForm = document.querySelector('#hackathonCheckinModal form');
-        const courseSelect = document.querySelector('#hackathonCheckinModal select[name="course_id"]');
-        if (courseSelect) {
-            courseSelect.addEventListener('change', updateHackathonStudentList);
-        }
         if (hackathonForm) {
             hackathonForm.addEventListener('submit', function (event) {
                 const checked = hackathonForm.querySelectorAll('input[name="student_ids[]"]:checked');
@@ -916,28 +1274,27 @@ if ($doExport && !$dbError && $selectedCourse) {
         }
     });
 
-    // Delete event function
-    function deleteEvent(eventId, eventName) {
-        if (confirm(`Are you sure you want to delete the event "${eventName}"? This will also remove all associated attendance records and cannot be undone.`)) {
-            // Create a form and submit it
+    // Toggle override time fields based on present/absent
+    function toggleOverrideTimes(val) {
+        document.getElementById('overrideTimeFields').style.display =
+            val === 'absent' ? 'none' : '';
+    }
+
+    // Remove professor from course - DISABLED: only admins can remove courses
+    /*
+    function removeCourse(courseId, courseName) {
+        if (confirm(`Are you sure you want to leave "" (\)?
+You will no longer have access to this course's attendance data.`)) {
             const form = document.createElement('form');
             form.method = 'POST';
             form.style.display = 'none';
-
-            const actionInput = document.createElement('input');
-            actionInput.name = 'action';
-            actionInput.value = 'delete_event';
-            form.appendChild(actionInput);
-
-            const eventInput = document.createElement('input');
-            eventInput.name = 'event_id';
-            eventInput.value = eventId;
-            form.appendChild(eventInput);
-
+            const a = document.createElement('input'); a.name = 'action'; a.value = 'remove_from_course'; form.appendChild(a);
+            const c = document.createElement('input'); c.name = 'course_id'; c.value = courseId; form.appendChild(c);
             document.body.appendChild(form);
             form.submit();
         }
     }
+    */
     </script>
 
     <!-- ── Hackathon Check-in Modal ── -->
@@ -981,23 +1338,15 @@ if ($doExport && !$dbError && $selectedCourse) {
                     </select>
                 </div>
 
-                <div class="form-group">
-                    <label>Course *</label>
-                    <select name="course_id" required>
-                        <option value="">-- Select Course --</option>
-                        <?php foreach ($courses as $c): ?>
-                        <option value="<?= htmlspecialchars($c['course_id']) ?>">
-                            <?= htmlspecialchars($c['course_id'] . ' - ' . $c['course_name']) ?>
-                        </option>
-                        <?php endforeach; ?>
-                    </select>
-                    <small>Select only the students who actually attended the hackathon.</small>
-                </div>
-
-                <div id="hackathonStudentSelection" class="form-group" style="display:none;">
+                <div id="hackathonStudentSelection" class="form-group">
                     <label>Students Attending *</label>
+                    <input type="text" 
+                           id="hackathonStudentSearch" 
+                           placeholder="Search students by name or ID..." 
+                           style="width:100%; padding:0.75rem; margin-bottom:0.75rem; border:1px solid #ccc; border-radius:4px; font-size:0.9rem;"
+                           onkeyup="searchHackathonStudents()">
                     <div id="hackathonStudentList" class="student-checkbox-list"></div>
-                    <small>Select the students who attended this hackathon. They will receive full credit.</small>
+                    <small>Select the students who attended this hackathon. They will receive full credit across all their enrolled courses.</small>
                 </div>
 
                 <div class="form-group">
