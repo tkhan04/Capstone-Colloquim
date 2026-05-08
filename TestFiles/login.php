@@ -80,8 +80,11 @@ try {
     $redirect = '';
     $accountNeedsSetup = (int)($user['account_needs_setup'] ?? 0);
 
-    // If student account needs setup, redirect to account completion page
-    if ($accountNeedsSetup && $user['role'] === 'student') {
+    // If student account needs setup AND still has the placeholder email
+    // (7-digit ID @gettysburg.edu), redirect to account completion page.
+    // If they already have a real email, skip setup and go straight to dashboard.
+    $hasPlaceholderEmail = (bool)preg_match('/^\d{7}@gettysburg\.edu$/', $user['email']);
+    if ($accountNeedsSetup && $user['role'] === 'student' && $hasPlaceholderEmail) {
         $redirect = "account_setup.php?student_id={$userId}";
     } else {
         // Normal dashboard redirect based on role

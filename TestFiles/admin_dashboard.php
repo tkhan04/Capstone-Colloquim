@@ -78,26 +78,27 @@ try {
 
         // ── CREATE COURSE ───────────────────────────────────────────────────────
         if ($action === 'create_course') {
-            $courseId  = trim($_POST['course_id']   ?? ''); // e.g. CS360
-            $courseName = trim($_POST['course_name'] ?? '');
-            $section   = trim($_POST['section']     ?? 'A');
-            $year      = (int)($_POST['year']       ?? date('Y'));
-            $semester  = trim($_POST['semester']    ?? 'Spring');
-            $minEvents = (int)($_POST['minimum_events_required'] ?? 0);
-            $profId    = (int)($_POST['professor_id'] ?? 0);
+            $courseNumber = strtoupper(trim($_POST['course_number'] ?? '')); // e.g. CS360
+            $courseName   = trim($_POST['course_name'] ?? '');
+            $section      = strtoupper(trim($_POST['section'] ?? 'A'));
+            $year         = (int)($_POST['year']       ?? date('Y'));
+            $semester     = trim($_POST['semester']    ?? 'Spring');
+            $minEvents    = (int)($_POST['minimum_events_required'] ?? 0);
+            $profId       = (int)($_POST['professor_id'] ?? 0);
 
-            if (!$courseId || !$courseName) {
-                $message = 'Course ID and name are required.';
+            // Auto-generate unique course_id: COURSENUMBER-SECTION (e.g. CS360-A)
+            $courseId = $courseNumber . '-' . $section;
+
+            if (!$courseNumber || !$courseName) {
+                $message = 'Course number and name are required.';
                 $messageType = 'error';
             } else {
-                // Insert into Course, then CourseAssignment if professor chosen
                 $pdo->prepare(
-                    "INSERT IGNORE INTO Course (course_id, course_name, section, year, semester, minimum_events_required)
-                     VALUES (?, ?, ?, ?, ?, ?)"
-                )->execute([$courseId, $courseName, $section, $year, $semester, $minEvents]);
+                    "INSERT IGNORE INTO Course (course_id, course_number, course_name, section, year, semester, minimum_events_required)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                )->execute([$courseId, $courseNumber, $courseName, $section, $year, $semester, $minEvents]);
 
                 if ($profId > 0) {
-                    // CourseAssignment links professor to course
                     $pdo->prepare(
                         "INSERT IGNORE INTO CourseAssignment (course_id, professor_id) VALUES (?, ?)"
                     )->execute([$courseId, $profId]);
@@ -105,6 +106,74 @@ try {
                 $message = 'Course created successfully!';
                 $messageType = 'success';
             }
+        }
+
+        // ── ADD NEW SECTION TO EXISTING COURSE ──────────────────────────────────
+        if ($action === 'add_section') {
+            $courseId = trim($_POST['course_id'] ?? '');
+            
+            if (!$courseId) {
+                $_SESSION['flash_message'] = 'Error: Invalid course';
+                $_SESSION['flash_type'] = 'error';
+            } else {
+                try {
+                    // Get course details (course_id is now unique per section)
+                    $courseStmt = $pdo->prepare(
+                        "SELECT course_number, course_name, year, semester, minimum_events_required
+                         FROM Course WHERE course_id = ? LIMIT 1"
+                    );
+                    $courseStmt->execute([$courseId]);
+                    $course = $courseStmt->fetch();
+                    
+                    if (!$course) {
+                        $_SESSION['flash_message'] = 'Course not found';
+                        $_SESSION['flash_type'] = 'error';
+                    } else {
+                        // Find the highest existing section for this course_number
+                        // so clicking "Add Section" on any card always creates the correct next one
+                        $maxStmt = $pdo->prepare(
+                            "SELECT section FROM Course WHERE course_number = ? ORDER BY section DESC LIMIT 1"
+                        );
+                        $maxStmt->execute([$course['course_number']]);
+                        $maxSection  = $maxStmt->fetchColumn() ?: 'A';
+                        $nextSection = chr(ord($maxSection) + 1); // A→B, B→C, etc.
+                        $newCourseId = $course['course_number'] . '-' . $nextSection;
+                        
+                        // Check if next section already exists
+                        $checkStmt = $pdo->prepare(
+                            "SELECT course_id FROM Course WHERE course_id = ? LIMIT 1"
+                        );
+                        $checkStmt->execute([$newCourseId]);
+                        
+                        if ($checkStmt->fetch()) {
+                            $_SESSION['flash_message'] = "Section {$nextSection} already exists for {$course['course_number']}";
+                            $_SESSION['flash_type'] = 'error';
+                        } else {
+                            $pdo->prepare(
+                                "INSERT INTO Course (course_id, course_number, course_name, section, year, semester, minimum_events_required)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                            )->execute([
+                                $newCourseId,
+                                $course['course_number'],
+                                $course['course_name'],
+                                $nextSection,
+                                $course['year'],
+                                $course['semester'],
+                                $course['minimum_events_required']
+                            ]);
+                            
+                            $_SESSION['flash_message'] = "Section {$nextSection} created for {$course['course_number']} (ID: {$newCourseId})!";
+                            $_SESSION['flash_type'] = 'success';
+                        }
+                    }
+                } catch (PDOException $e) {
+                    $_SESSION['flash_message'] = 'Database error: ' . $e->getMessage();
+                    $_SESSION['flash_type'] = 'error';
+                }
+            }
+            
+            header("Location: ?admin_id={$adminId}&tab=courses");
+            exit;
         }
 
         // ── ASSIGN PROFESSOR TO COURSE ──────────────────────────────────────────
@@ -162,15 +231,20 @@ try {
         if ($action === 'delete_course') {
             $cid = trim($_POST['course_id'] ?? '');
             $pdo->prepare("DELETE FROM Course WHERE course_id = ?")->execute([$cid]);
-            $message = 'Course deleted.';
+            $message = "Course deleted.";
             $messageType = 'success';
         }
 
         // ── MANUAL ADD STUDENT TO ROSTER ────────────────────────────────────────
         if ($action === 'add_to_roster') {
             $studentId = (int)$_POST['student_id'];
-            $courseId  = trim($_POST['course_id'] ?? '');
-            if ($selectedCourseId) $courseId = (string)$selectedCourseId;
+            $courseId  = $selectedCourseId ?: trim($_POST['course_id'] ?? '');
+
+            // Look up section from the Course record (course_id is unique per section)
+            $sRow = $pdo->prepare("SELECT section FROM Course WHERE course_id = ? LIMIT 1");
+            $sRow->execute([$courseId]);
+            $sData = $sRow->fetch();
+            $enrollSection = $sData ? $sData['section'] : 'A';
 
             // Check not already enrolled
             $existing = $pdo->prepare(
@@ -183,8 +257,8 @@ try {
                 $messageType = 'error';
             } else {
                 $pdo->prepare(
-                    "INSERT INTO EnrollmentInCourses (student_id, course_id, status) VALUES (?, ?, 'active')"
-                )->execute([$studentId, $courseId]);
+                    "INSERT INTO EnrollmentInCourses (student_id, course_id, section, status) VALUES (?, ?, ?, 'active')"
+                )->execute([$studentId, $courseId, $enrollSection]);
                 $_SESSION['flash_message'] = 'Student added to roster.';
                 $_SESSION['flash_type']    = 'success';
                 header("Location: ?admin_id={$adminId}&tab=rosters&course_id=" . urlencode($courseId));
@@ -198,7 +272,6 @@ try {
             $pdo->prepare("DELETE FROM EnrollmentInCourses WHERE enrollment_id = ?")->execute([$enrollId]);
             $_SESSION['flash_message'] = 'Student removed from roster.';
             $_SESSION['flash_type']    = 'success';
-            // PRG redirect to keep course selected after remove
             $cid = trim($_POST['course_id'] ?? '');
             header("Location: ?admin_id={$adminId}&tab=rosters" . ($cid ? '&course_id=' . urlencode($cid) : ''));
             exit;
@@ -208,8 +281,14 @@ try {
         // Accepts Gettysburg PeopleSoft CSV export: ID, Name, Level
         // Creates AppUser + Student rows + enrolls in course
         if ($action === 'upload_roster_csv') {
-            $courseId = trim($_POST['course_id'] ?? '');
-            if ($selectedCourseId) $courseId = (string)$selectedCourseId;
+            // course_id is now unique per section — no more pipe-splitting
+            $courseId = $selectedCourseId ?: trim($_POST['course_id'] ?? '');
+
+            // Look up section from the Course record
+            $sRow = $pdo->prepare("SELECT section FROM Course WHERE course_id = ? LIMIT 1");
+            $sRow->execute([$courseId]);
+            $sData = $sRow->fetch();
+            $section = $sData ? $sData['section'] : 'A';
 
             if (!$courseId) {
                 $message = 'Select a course before uploading a roster.';
@@ -241,11 +320,11 @@ try {
                         $message = 'Upload error: ' . $parseResult['error'];
                         $messageType = 'error';
                     } else {
-                        // Create student accounts and enrollments using helper
-                        $importResult = createStudentAccounts($pdo, $courseId, $parseResult['data'], 'changeme123');
+                        // Create student accounts and enrollments using helper (now with section)
+                        $importResult = createStudentAccounts($pdo, $courseId, $section, $parseResult['data'], 'changeme123');
                         
                         $msg = "Upload complete: {$importResult['created']} student(s) created, " .
-                               "{$importResult['enrolled']} enrolled, {$importResult['alreadyIn']} already enrolled.";
+                               "{$importResult['enrolled']} enrolled in Section {$section}, {$importResult['alreadyIn']} already enrolled.";
                         if ($importResult['skipped']) {
                             $msg .= " {$importResult['skipped']} row(s) skipped.";
                         }
@@ -280,13 +359,13 @@ try {
 
     // Courses with assigned professors (one row per assignment for remove button)
     $courses = $pdo->query(
-        "SELECT c.course_id, c.course_name, c.section, c.year, c.semester, c.minimum_events_required,
+        "SELECT c.course_id, c.course_number, c.course_name, c.section, c.year, c.semester, c.minimum_events_required,
                 GROUP_CONCAT(CONCAT(p.fname,' ',p.lname) SEPARATOR ', ') AS professors
          FROM Course c
          LEFT JOIN CourseAssignment ca ON c.course_id = ca.course_id
          LEFT JOIN Professor p ON ca.professor_id = p.professor_id
-         GROUP BY c.course_id
-         ORDER BY c.course_id"
+         GROUP BY c.course_id, c.section
+         ORDER BY c.course_number, c.section"
     )->fetchAll();
 
     // Also fetch per-assignment rows so admin can remove individual professors
@@ -317,6 +396,9 @@ try {
     // Enrollments for the selected course
     $enrollments = [];
     if ($selectedCourseId) {
+        // course_id is now unique per section — no pipe-splitting needed
+        $courseId = $selectedCourseId;
+
         $stmt = $pdo->prepare(
             "SELECT e.enrollment_id, e.status, s.student_id, s.fname, s.lname, s.email
              FROM EnrollmentInCourses e
@@ -324,10 +406,9 @@ try {
              WHERE e.course_id = ?
              ORDER BY s.lname, s.fname"
         );
-        $stmt->execute([$selectedCourseId]);
+        $stmt->execute([$courseId]);
         $enrollments = $stmt->fetchAll();
     }
-
 } catch (PDOException $e) {
     $dbError = 'Database error: ' . $e->getMessage();
 }
@@ -509,12 +590,12 @@ try {
             <!-- Course selector -->
             <div class="course-selector">
                 <label>Select Course:</label>
-                <select onchange="window.location.href='?admin_id=<?= $adminId ?>&tab=rosters&course_id='+this.value">
+                <select onchange="window.location.href='?admin_id=<?= $adminId ?>&tab=rosters&course_id='+encodeURIComponent(this.value)">
                     <option value="">-- Choose a course --</option>
                     <?php foreach ($courses as $c): ?>
                     <option value="<?= htmlspecialchars($c['course_id']) ?>"
                             <?= ($selectedCourseId !== '' && $selectedCourseId === $c['course_id']) ? 'selected' : '' ?>>
-                        <?= htmlspecialchars($c['course_id'] . ' - ' . $c['course_name']) ?>
+                        <?= htmlspecialchars(($c['course_number'] ?? $c['course_id']) . ' – ' . $c['course_name'] . ' (Section ' . $c['section'] . ')') ?>
                     </option>
                     <?php endforeach; ?>
                 </select>
@@ -645,13 +726,29 @@ try {
                     <div class="course-admin-card-header">
                         <div>
                             <h3><?= htmlspecialchars($c['course_name']) ?></h3>
-                            <span class="badge" style="margin-top:.3rem;display:inline-block;"><?= htmlspecialchars($c['course_id']) ?></span>
+                            <span class="badge" style="margin-top:.3rem;display:inline-block;">
+                                <?= htmlspecialchars($c['course_number'] ?? $c['course_id']) ?>
+                            </span>
+                            <span class="badge" style="margin-top:.3rem;display:inline-block;background:#eef2ff;color:#3730a3;font-size:.72rem;">
+                                ID: <?= htmlspecialchars($c['course_id']) ?>
+                            </span>
                         </div>
-                        <form method="POST" onsubmit="return confirm('Delete <?= htmlspecialchars(addslashes($c['course_name'])) ?>? This cannot be undone.');">
-                            <input type="hidden" name="action"    value="delete_course">
-                            <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
-                            <button type="submit" class="btn-delete-small" title="Delete course"><i class="fas fa-trash"></i></button>
-                        </form>
+                        <div style="display:flex;gap:.5rem;">
+                            <!-- Add Section Button -->
+                            <form method="POST" style="display:inline;">
+                                <input type="hidden" name="action" value="add_section">
+                                <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
+                                <button type="submit" class="btn-small" style="background:#ff6600;color:white;border:none;padding:.5rem 1rem;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:.5rem;" title="Add next section">
+                                    <i class="fas fa-plus-circle"></i> Add Section
+                                </button>
+                            </form>
+                            <!-- Delete Course Button -->
+                            <form method="POST" onsubmit="return confirm('Delete <?= htmlspecialchars(addslashes($c['course_name'])) ?> (<?= htmlspecialchars($c['course_id']) ?>)? This cannot be undone.');">
+                                <input type="hidden" name="action"    value="delete_course">
+                                <input type="hidden" name="course_id" value="<?= htmlspecialchars($c['course_id']) ?>">
+                                <button type="submit" class="btn-delete-small" title="Delete section"><i class="fas fa-trash"></i></button>
+                            </form>
+                        </div>
                     </div>
 
                     <div class="course-admin-meta">
@@ -720,8 +817,11 @@ try {
                     <input type="hidden" name="action" value="create_course">
                     <div class="form-row">
                         <div class="form-group">
-                            <label>Course ID * (e.g. CS360)</label>
-                            <input type="text" name="course_id" required placeholder="CS360">
+                            <label>Course Number * (e.g. CS360)</label>
+                            <input type="text" name="course_number" required placeholder="CS360">
+                            <small style="color:#888;margin-top:.25rem;display:block;">
+                                The unique course number. The system will generate the full ID (e.g. CS360-A).
+                            </small>
                         </div>
                         <div class="form-group">
                             <label>Section</label>

@@ -1,4 +1,4 @@
-check<?php
+<?php
 /**
  * ATTENDANCE.PHP  –  Student Colloquium Attendance Form (Scanner Optimized)
  *
@@ -62,7 +62,20 @@ try {
     $dbError = 'Database connection failed: ' . $e->getMessage();
 }
 
-$lastStudentId  = '';
+$lastStudentId = '';
+
+// ── Page-level window state (used by HTML renderer) ──────────────────────────
+// Computed once here so both POST handler and HTML agree on the same $now.
+$pageNow = date('Y-m-d H:i:s');
+$pageIsExpired         = false;
+$pageCheckoutWindowEnd = null;
+$pageSecondsUntilExpiry = null;
+
+if ($selectedEvent) {
+    $pageCheckoutWindowEnd   = date('Y-m-d H:i:s', strtotime($selectedEvent['end_time'] . ' +10 minutes'));
+    $pageIsExpired           = $pageNow > $pageCheckoutWindowEnd;
+    $pageSecondsUntilExpiry  = max(0, strtotime($pageCheckoutWindowEnd) - strtotime($pageNow));
+}
 
 // ── Handle POST submission ────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
@@ -99,7 +112,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
             
             // Form expires after check-out window ends
             if ($now > $checkOutWindowEnd) {
-                $message     = '❌ This form is no longer available (event has ended).';
+                $message     = 'This form is no longer available (event has ended).';
                 $messageType = 'error';
             } else {
                 // Verify student exists
@@ -108,7 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                 $studentRow = $s->fetch();
 
                 if (!$studentRow) {
-                    $message     = '❌ Student ID not found.';
+                    $message     = 'Student ID not found.';
                     $messageType = 'error';
                 } else {
                     // Get ALL active enrolled courses for this student
@@ -121,8 +134,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                     $courseStmt->execute([$rawStudentId]);
                     $studentEnrolledCourses = $courseStmt->fetchAll();
 
+                    // Deduplicate by course_id — a student enrolled in multiple sections
+                    // of the same course would otherwise cause a duplicate primary key
+                    // error in AttendsEventSessions on check-in and check-out.
+                    $seen = [];
+                    $studentEnrolledCourses = array_values(array_filter(
+                        $studentEnrolledCourses,
+                        function ($e) use (&$seen) {
+                            if (isset($seen[$e['course_id']])) return false;
+                            $seen[$e['course_id']] = true;
+                            return true;
+                        }
+                    ));
+
                     if (empty($studentEnrolledCourses)) {
-                        $message     = '❌ Student is not enrolled in any active courses.';
+                        $message     = 'Student is not enrolled in any active courses.';
                         $messageType = 'error';
                     } else {
                         // Check if already checked in for this event
@@ -141,6 +167,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                         $checkoutStmt->execute([$rawStudentId, $eventId]);
                         $alreadyCheckedOut = $checkoutStmt->fetchColumn() > 0;
 
+                        // ── Late check-in window: event_start+5min → event_end ──────────────
+                        // Students arriving after the on-time window get partial credit.
+                        $lateCheckInWindowEnd = $eventEnd; // late window closes when event ends
+
                         // AUTO-DETECT BASED ON TIME
                         if ($alreadyCheckedOut) {
                             // Already completed
@@ -152,60 +182,101 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                                 $message     = "{$studentRow['fname']} – Not checked in";
                                 $messageType = 'error';
                             } else {
-                                // Valid check-out
-                                foreach ($studentEnrolledCourses as $enrollment) {
-                                    $courseId = $enrollment['course_id'];
-                                    $minRequired = (int)$enrollment['minimum_events_required'];
+                                // Query the ACTUAL pending check-in records as source of truth.
+                                // Using AttendsEventSessions (not current enrollment) ensures we
+                                // always update the rows that were created at check-in, even if
+                                // enrollment changed between check-in and check-out.
+                                $pendingStmt = $pdo->prepare(
+                                    "SELECT a.course_id, a.audit_note, c.minimum_events_required
+                                     FROM AttendsEventSessions a
+                                     JOIN Course c ON a.course_id = c.course_id
+                                     WHERE a.student_id = ? AND a.event_id = ?
+                                       AND a.start_scan_time IS NOT NULL AND a.end_scan_time IS NULL"
+                                );
+                                $pendingStmt->execute([$rawStudentId, $eventId]);
+                                $pendingCheckIns = $pendingStmt->fetchAll();
 
-                                    // Determine if required or extra credit
+                                foreach ($pendingCheckIns as $pending) {
+                                    $courseId     = $pending['course_id'];
+                                    $minRequired  = (int)$pending['minimum_events_required'];
+                                    // Use ?: so that both NULL and FALSE (from fetchAll) are treated as ''
+                                    $existingNote = $pending['audit_note'] ?: '';
+                                    $isLateArrival = strpos($existingNote, 'Late arrival') !== false;
+
+                                    // Count previously completed events for this course
                                     $countStmt = $pdo->prepare(
-                                        "SELECT COUNT(DISTINCT event_id) as completed
+                                        "SELECT COUNT(DISTINCT event_id)
                                          FROM AttendsEventSessions
                                          WHERE student_id = ? AND course_id = ? AND end_scan_time IS NOT NULL"
                                     );
                                     $countStmt->execute([$rawStudentId, $courseId]);
-                                    $completedCount = (int)($countStmt->fetchColumn() ?? 0);
+                                    $completedCount = (int)($countStmt->fetchColumn() ?: 0);
+
+                                    if ($isLateArrival) {
+                                        $checkoutNote = 'Late arrival - partial credit';
+                                    } elseif ($completedCount >= $minRequired) {
+                                        $checkoutNote = 'Extra credit beyond minimum';
+                                    } else {
+                                        $checkoutNote = 'Required attendance';
+                                    }
 
                                     $pdo->prepare(
                                         "UPDATE AttendsEventSessions
                                          SET end_scan_time = ?, audit_note = ?
                                          WHERE student_id = ? AND event_id = ? AND course_id = ?"
-                                    )->execute([$now, 
-                                        ($completedCount >= $minRequired) ? 'Extra credit beyond minimum' : 'Required attendance',
-                                        $rawStudentId, $eventId, $courseId]);
+                                    )->execute([$now, $checkoutNote, $rawStudentId, $eventId, $courseId]);
                                 }
                                 $message     = "✓ {$studentRow['fname']} – Checked out successfully";
                                 $messageType = 'success';
                                 $lastStudentId = '';
                             }
                         } elseif ($now >= $checkInWindowStart && $now <= $checkInWindowEnd) {
-                            // ──── AUTO CHECK-IN ────
+                            // ──── AUTO CHECK-IN (full credit) ────
                             if ($alreadyCheckedIn) {
-                                $message     = "✓ {$studentRow['fname']} – Already checked in";
+                                $message     = "✓ {$studentRow['fname']} – Already checked in. Return to scan out when the event ends.";
                                 $messageType = 'info';
                             } else {
-                                // Valid check-in
                                 foreach ($studentEnrolledCourses as $enrollment) {
                                     $courseId = $enrollment['course_id'];
-                                    
                                     $pdo->prepare(
                                         "INSERT INTO AttendsEventSessions
-                                             (student_id, event_id, course_id, start_scan_time)
-                                         VALUES (?, ?, ?, ?)"
-                                    )->execute([$rawStudentId, $eventId, $courseId, $now]);
+                                             (student_id, event_id, course_id, start_scan_time, audit_note)
+                                         VALUES (?, ?, ?, ?, ?)"
+                                    )->execute([$rawStudentId, $eventId, $courseId, $now, 'Required attendance']);
                                 }
                                 $message     = "✓ {$studentRow['fname']} – Checked in successfully";
                                 $messageType = 'success';
+                                $lastStudentId = '';
+                            }
+                        } elseif ($now > $checkInWindowEnd && $now < $lateCheckInWindowEnd) {
+                            // ──── LATE CHECK-IN (partial credit) ────
+                            // Student arrived after the 5-min on-time window but before the event ends.
+                            if ($alreadyCheckedIn) {
+                                $message     = "✓ {$studentRow['fname']} – Already checked in. Return to scan out when the event ends.";
+                                $messageType = 'info';
+                            } else {
+                                $minutesLate = (int)ceil((strtotime($now) - strtotime($checkInWindowEnd)) / 60);
+                                foreach ($studentEnrolledCourses as $enrollment) {
+                                    $courseId = $enrollment['course_id'];
+                                    $pdo->prepare(
+                                        "INSERT INTO AttendsEventSessions
+                                             (student_id, event_id, course_id, start_scan_time, audit_note)
+                                         VALUES (?, ?, ?, ?, ?)"
+                                    )->execute([$rawStudentId, $eventId, $courseId, $now,
+                                                'Late arrival - partial credit']);
+                                }
+                                $message     = "{$studentRow['fname']} – Checked in late. Partial credit only.";
+                                $messageType = 'warning';
                                 $lastStudentId = '';
                             }
                         } else {
                             // Outside all windows
                             if ($now < $checkInWindowStart) {
                                 $minutesUntil = ceil((strtotime($checkInWindowStart) - strtotime($now)) / 60);
-                                $message     = "⏱ Check-in opens in ~{$minutesUntil} minutes";
+                                $message     = "Check-in opens in ~{$minutesUntil} minutes";
                                 $messageType = 'warning';
                             } else {
-                                $message     = "Not in check-in or check-out window";
+                                $message     = "This form is no longer available (event has ended).";
                                 $messageType = 'error';
                             }
                         }
@@ -277,7 +348,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                 </div>
                 <?php endif; ?>
 
-                <form method="POST" class="checkin-form">
+                <?php if ($pageIsExpired): ?>
+                <!-- ── EXPIRED STATE ── -->
+                <div class="toast error" style="margin-top:2rem;font-size:1.15rem;padding:1.5rem;" id="expiredBanner">
+                    <i class="fas fa-lock" style="font-size:2rem;"></i>
+                    <div>
+                        <strong>Colloquium link is expired.</strong><br>
+                        <span style="font-size:0.95rem;font-weight:400;">
+                            If time ran out before you could scan out, go to your professor to let them know.
+                        </span>
+                    </div>
+                </div>
+                <?php else: ?>
+                <!-- ── ACTIVE FORM ── -->
+                <form method="POST" class="checkin-form" id="checkinForm">
                     <div class="form-group" style="margin-top:2rem;">
                         <label for="student_id" style="font-size:1.2rem;font-weight:600;"><i class="fas fa-id-card"></i> Student ID</label>
                         <input type="text" id="student_id" name="student_id"
@@ -286,7 +370,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
                                autocomplete="off"
                                autofocus
                                inputmode="numeric"
-                               pattern="\d{7}"
+                               pattern="[0-9]*"
                                maxlength="7"
                                oninput="this.value = this.value.replace(/[^0-9]/g, '')"
                                style="font-size:1.1rem;padding:1rem;margin-top:0.75rem;">
@@ -299,9 +383,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$dbError) {
 
                 <div class="checkin-note" style="margin-top:2rem;font-size:0.9rem;">
                     <i class="fas fa-info-circle"></i>
-                    <strong>Check-in:</strong> 10 min before → 5 min after event starts<br>
+                    <strong>Full credit check-in:</strong> 10 min before → 5 min after event starts<br>
+                    <strong>Partial credit check-in:</strong> After 5 min grace period → until event ends<br>
                     <strong>Check-out:</strong> Event ends → 10 min after event ends
                 </div>
+
+                <?php if ($pageSecondsUntilExpiry !== null && $pageSecondsUntilExpiry > 0): ?>
+                <script>
+                    // Auto-expire the form when the checkout window closes
+                    (function () {
+                        var secondsLeft = <?= (int)$pageSecondsUntilExpiry ?>;
+                        setTimeout(function () {
+                            var form = document.getElementById('checkinForm');
+                            var note = form ? form.nextElementSibling : null;
+                            if (form) form.style.display = 'none';
+                            if (note) note.style.display = 'none';
+
+                            var banner = document.createElement('div');
+                            banner.className = 'toast error';
+                            banner.style.cssText = 'margin-top:2rem;font-size:1.15rem;padding:1.5rem;';
+                            banner.innerHTML =
+                                '<i class="fas fa-lock" style="font-size:2rem;flex-shrink:0;"></i>' +
+                                '<div><strong>Colloquium link is expired.</strong><br>' +
+                                '<span style="font-size:0.95rem;font-weight:400;">' +
+                                'If time ran out before you could scan out, go to your professor to let them know.' +
+                                '</span></div>';
+
+                            var container = document.querySelector('.checkin-container');
+                            if (container) container.appendChild(banner);
+                        }, secondsLeft * 1000);
+                    })();
+                </script>
+                <?php endif; ?>
+
+                <?php endif; // end $pageIsExpired ?>
 
                 <?php endif; ?>
             </div>

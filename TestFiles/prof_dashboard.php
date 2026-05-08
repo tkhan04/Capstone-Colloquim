@@ -24,11 +24,12 @@ date_default_timezone_set('America/New_York');
 session_start();
 require __DIR__ . '/../secrets/db.php';
 
-$profId          = (int)($_GET['prof_id']   ?? 1);
+$profId           = (int)($_GET['prof_id']   ?? 1);
 $selectedCourseId = trim($_GET['course_id'] ?? '');
-$filterType      = trim($_GET['event_type'] ?? '');
-$search          = trim($_GET['search']     ?? '');
-$dbError         = '';
+$selectedSection  = trim($_GET['section']   ?? '');
+$filterType       = trim($_GET['event_type'] ?? '');
+$search           = trim($_GET['search']     ?? '');
+$dbError          = '';
 
 // ── Flash message handling ───────────────────────────────────────────────────
 $message     = '';
@@ -358,14 +359,14 @@ try {
 
     // ── Courses this professor teaches ────────────────────────────────────────
     $stmt = $pdo->prepare(
-        "SELECT c.course_id, c.course_name, c.section, c.semester, c.year,
+        "SELECT c.course_id, c.course_number, c.course_name, c.section, c.semester, c.year,
                 c.minimum_events_required,
                 (SELECT COUNT(*) FROM EnrollmentInCourses e
-                 WHERE e.course_id = c.course_id AND e.status = 'active') AS student_count
+                 WHERE e.course_id = c.course_id AND e.section = c.section AND e.status = 'active') AS student_count
          FROM Course c
          JOIN CourseAssignment ca ON c.course_id = ca.course_id
          WHERE ca.professor_id = ?
-         ORDER BY c.year DESC, c.semester, c.course_id"
+         ORDER BY c.year DESC, c.semester, c.course_number, c.section"
     );
     $stmt->execute([$profId]);
     $courses = $stmt->fetchAll();
@@ -403,9 +404,10 @@ try {
     $courseStudents  = [];
 
     if ($selectedCourseId) {
-        // Find selected course in already-fetched list
+        // Match on both course_id AND section so two sections of the same course
+        // are treated as independent selections
         foreach ($courses as $c) {
-            if ($c['course_id'] === $selectedCourseId) {
+            if ($c['course_id'] === $selectedCourseId && $c['section'] === $selectedSection) {
                 $selectedCourse = $c;
                 break;
             }
@@ -434,7 +436,7 @@ try {
 
             // Build students query with optional name/ID search
             $searchParam = $search ? "%{$search}%" : null;
-            $params      = [$selectedCourseId];
+            $params      = [$selectedCourseId, $selectedSection];
             $searchSql   = '';
             if ($searchParam) {
                 $searchSql = "AND (s.fname LIKE ? OR s.lname LIKE ? OR CONCAT(s.fname,' ',s.lname) LIKE ? OR s.student_id LIKE ?)";
@@ -446,7 +448,7 @@ try {
                         e.enrollment_id, e.status
                  FROM EnrollmentInCourses e
                  JOIN Student s ON e.student_id = s.student_id
-                 WHERE e.course_id = ? $searchSql
+                 WHERE e.course_id = ? AND e.section = ? $searchSql
                  ORDER BY s.lname, s.fname"
             );
             $stmt->execute($params);
@@ -496,26 +498,66 @@ try {
                     $attended = (int)$aStmt->fetchColumn();
                 }
 
+                // ── Count pending sessions: checked IN but never checked OUT ──────────
+                // These are real check-ins that didn't get a check-out scan.
+                // We surface them visually without granting full credit.
+                $pendingParams = [$stu['student_id'], $selectedCourseId];
+                $pendingTypeSql = '';
+                if ($filterType) {
+                    $pendingTypeSql = "AND ev.event_type = ?";
+                    $pendingParams[] = $filterType;
+                }
+                $pendingStmt = $pdo->prepare(
+                    "SELECT COUNT(DISTINCT a.event_id)
+                     FROM AttendsEventSessions a
+                     JOIN Event ev ON a.event_id = ev.event_id
+                     WHERE a.student_id = ?
+                       AND a.course_id  = ?
+                       AND a.start_scan_time IS NOT NULL
+                       AND a.end_scan_time IS NULL
+                       AND a.overridden_by IS NULL
+                       $pendingTypeSql"
+                );
+                $pendingStmt->execute($pendingParams);
+                $pendingCount = (int)$pendingStmt->fetchColumn();
+
                 $min = (int)$selectedCourse['minimum_events_required'];
-                
+
                 // Separate required vs extra credit
-                // Required = min(attended, minimum_required)
-                // Extra = max(0, attended - minimum_required)
                 $requiredAttended = min($attended, $min);
-                $extraAttended = max(0, $attended - $min);
-                
-                // Percentage capped at 100%
-                $pct = $min > 0 ? min(100, round($requiredAttended / $min * 100)) : 0;
+                $extraAttended    = max(0, $attended - $min);
+
+                // ── Percentage with "needs-review" signal ────────────────────────────
+                // If the student has pending (no-checkout) sessions that would push them
+                // to or past a meaningful threshold (50 % / 100 %), we display one point
+                // BELOW that threshold (49 % or 99 %) so the professor immediately knows
+                // the record needs confirmation/override before full credit is granted.
+                $confirmedPct = $min > 0 ? min(100, round($requiredAttended / $min * 100)) : 0;
+                $hasPending   = $pendingCount > 0;
+
+                if ($hasPending) {
+                    $potentialAttended = min($requiredAttended + $pendingCount, $min);
+                    $potentialPct      = $min > 0 ? min(100, round($potentialAttended / $min * 100)) : 0;
+                    // Signal value: one below what full credit would show
+                    $pct = ($potentialPct > $confirmedPct) ? ($potentialPct - 1) : $confirmedPct;
+                } else {
+                    $pct = $confirmedPct;
+                }
+
+                // Status uses confirmed attendance only (pending never grants "Excellent")
                 $status = $requiredAttended >= $min && $min > 0 ? 'Excellent'
-                        : ($pct >= 50 ? 'Fair' : 'Poor');
+                        : ($confirmedPct >= 50 ? 'Fair' : 'Poor');
 
                 $courseStudents[] = $stu + [
-                    'events_attended' => $requiredAttended,
-                    'extra_attended'  => $extraAttended,
-                    'events_total'    => $min,
-                    'pct'             => $pct,
-                    'meets'           => $requiredAttended >= $min,
-                    'status_label'    => $min === 0 ? '—' : $status,
+                    'events_attended'  => $requiredAttended,
+                    'extra_attended'   => $extraAttended,
+                    'pending_count'    => $pendingCount,
+                    'has_pending'      => $hasPending,
+                    'events_total'     => $min,
+                    'pct'              => $pct,
+                    'confirmed_pct'    => $confirmedPct,
+                    'meets'            => $requiredAttended >= $min,
+                    'status_label'     => $min === 0 ? '—' : $status,
                 ];
             }
 
@@ -527,7 +569,7 @@ try {
                 $placeholders = implode(',', array_fill(0, count($stuIds), '?'));
                 $detailParams = array_merge($stuIds, [$selectedCourseId]);
                 $detailStmt  = $pdo->prepare(
-                    "SELECT a.student_id, ev.event_name, ev.event_type,
+                    "SELECT a.student_id, a.event_id, ev.event_name, ev.event_type,
                             ev.start_time AS event_start, ev.end_time AS event_end,
                             a.start_scan_time, a.end_scan_time, a.minutes_present,
                             a.overridden_by, a.audit_note
@@ -535,7 +577,6 @@ try {
                      JOIN Event ev ON a.event_id = ev.event_id
                      WHERE a.student_id IN ($placeholders)
                        AND a.course_id = ?
-                       AND a.end_scan_time IS NOT NULL
                      ORDER BY ev.start_time DESC"
                 );
                 $detailStmt->execute($detailParams);
@@ -625,6 +666,7 @@ if ($doExport && !$dbError && $selectedCourse) {
         .badge-excellent { background:#e8f5e9; color:#2e7d32; }
         .badge-fair      { background:#fff8e1; color:#f9a825; }
         .badge-poor      { background:#ffebee; color:#c62828; }
+        .badge-pending   { background:#fff3cd; color:#92400e; border:1px dashed #d97706; }
         .pct-bar { height:6px; background:#eee; border-radius:3px; margin-top:4px; }
         .pct-bar-inner { height:6px; border-radius:3px; background:#003366; }
         .filter-row { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; margin-bottom:1.5rem; }
@@ -798,19 +840,19 @@ if ($doExport && !$dbError && $selectedCourse) {
             <div class="course-grid">
                 <?php foreach ($courses as $course): ?>
                 <div class="course-card-wrapper" style="position:relative;">
-                    <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($course['course_id']) ?>"
-                       class="course-card <?= $selectedCourseId === $course['course_id'] ? 'selected' : '' ?>">
+                    <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($course['course_id']) ?>&section=<?= urlencode($course['section']) ?>"
+                       class="course-card <?= ($selectedCourseId === $course['course_id'] && $selectedSection === $course['section']) ? 'selected' : '' ?>">
                         <div class="course-header">
-                            <span class="course-code"><?= htmlspecialchars($course['course_id']) ?></span>
+                            <span class="course-code"><?= htmlspecialchars($course['course_number'] ?? $course['course_id']) ?></span>
                             <span class="course-semester"><?= htmlspecialchars($course['semester'] . ' ' . $course['year']) ?></span>
                         </div>
                         <h3 class="course-name"><?= htmlspecialchars($course['course_name']) ?></h3>
                         <div class="course-stats">
-                            <span><i class="fas fa-user-graduate"></i> Students <?= $course['student_count'] ?></span>
+                            <span><i class="fas fa-user-graduate"></i> Students: <?= $course['student_count'] ?></span>
+                            <span><i class="fas fa-layer-group"></i> Section <?= htmlspecialchars($course['section']) ?></span>
                             <span><i class="fas fa-calendar-check"></i> Min Required: <?= $course['minimum_events_required'] ?></span>
                         </div>
                     </a>
-                    <!-- Leave Course button removed - only admins can remove courses -->
                 </div>
                 <?php endforeach; ?>
 
@@ -840,7 +882,7 @@ if ($doExport && !$dbError && $selectedCourse) {
                     </p>
                 </div>
                 <!-- Export CSV button -->
-                <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($selectedCourseId) ?>&export=1&event_type=<?= urlencode($filterType) ?>&search=<?= urlencode($search) ?>"
+                <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($selectedCourseId) ?>&section=<?= urlencode($selectedSection) ?>&export=1&event_type=<?= urlencode($filterType) ?>&search=<?= urlencode($search) ?>"
                    class="btn-small">
                     <i class="fas fa-download"></i> Export CSV
                 </a>
@@ -850,6 +892,7 @@ if ($doExport && !$dbError && $selectedCourse) {
             <form method="GET" class="filter-row">
                 <input type="hidden" name="prof_id"   value="<?= $profId ?>">
                 <input type="hidden" name="course_id" value="<?= htmlspecialchars($selectedCourseId) ?>">
+                <input type="hidden" name="section"   value="<?= htmlspecialchars($selectedSection) ?>">
 
                 <select name="event_type">
                     <option value="">All Event Types</option>
@@ -865,7 +908,7 @@ if ($doExport && !$dbError && $selectedCourse) {
 
                 <button type="submit" class="btn-small"><i class="fas fa-filter"></i> Filter</button>
                 <?php if ($filterType || $search): ?>
-                <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($selectedCourseId) ?>" class="btn-small">
+                <a href="?prof_id=<?= $profId ?>&course_id=<?= urlencode($selectedCourseId) ?>&section=<?= urlencode($selectedSection) ?>" class="btn-small">
                     <i class="fas fa-times"></i> Clear
                 </a>
                 <?php endif; ?>
@@ -926,15 +969,39 @@ if ($doExport && !$dbError && $selectedCourse) {
                             </td>
                             <td>
                                 <strong><?= $stu['pct'] ?>%</strong>
+                                <?php if ($stu['has_pending']): ?>
+                                <span title="<?= $stu['pending_count'] ?> check-in(s) with no check-out — confirm or override"
+                                      style="margin-left:.35rem;color:#d97706;font-size:.8rem;cursor:help;">
+                                    <i class="fas fa-exclamation-triangle"></i>
+                                </span>
+                                <?php endif; ?>
                                 <div class="pct-bar">
-                                    <div class="pct-bar-inner" style="width:<?= min($stu['pct'],100) ?>%"></div>
+                                    <div class="pct-bar-inner" style="width:<?= min($stu['confirmed_pct'],100) ?>%;"></div>
+                                    <?php if ($stu['has_pending']): ?>
+                                    <div style="position:relative;height:6px;margin-top:-6px;
+                                                border-radius:3px;background:repeating-linear-gradient(
+                                                    90deg,#f59e0b 0 4px,transparent 4px 8px);
+                                                width:<?= min($stu['pct'],100) - min($stu['confirmed_pct'],100) ?>%;
+                                                margin-left:<?= min($stu['confirmed_pct'],100) ?>%;"></div>
+                                    <?php endif; ?>
                                 </div>
+                                <?php if ($stu['has_pending']): ?>
+                                <small style="color:#d97706;font-size:.72rem;">
+                                    <?= $stu['pending_count'] ?> pending
+                                </small>
+                                <?php endif; ?>
                             </td>
                             <td>
                                 <?php
                                 $label = $stu['status_label'];
-                                $cls   = $label === 'Excellent' ? 'badge-excellent'
-                                       : ($label === 'Fair'      ? 'badge-fair' : 'badge-poor');
+                                if ($stu['has_pending'] && $label !== 'Excellent') {
+                                    // Override label to signal review needed
+                                    $cls = 'badge-pending';
+                                    $label = 'Pending';
+                                } else {
+                                    $cls = $label === 'Excellent' ? 'badge-excellent'
+                                         : ($label === 'Fair'      ? 'badge-fair' : 'badge-poor');
+                                }
                                 ?>
                                 <span class="status-badge <?= $cls ?>"><?= $label ?></span>
                             </td>
@@ -975,24 +1042,45 @@ if ($doExport && !$dbError && $selectedCourse) {
                                         </thead>
                                         <tbody>
                                         <?php foreach ($evDetails as $ed):
+                                            $isPending = ($ed['start_scan_time'] !== null && $ed['end_scan_time'] === null && $ed['overridden_by'] === null);
+                                            // "Late - needs override": checked in late, checked out, but not yet reviewed
+                                            $needsOverride = (!$isPending
+                                                && $ed['overridden_by'] === null
+                                                && $ed['end_scan_time'] !== null
+                                                && strpos($ed['audit_note'] ?? '', 'needs override') !== false);
                                             // Credit is given if:
                                             // 1. Overridden by professor, OR
                                             // 2. Checked in within 10 min BEFORE to 5 min AFTER event start AND checked out at/after event end
-                                            $hasCredit = $ed['overridden_by'] !== null
+                                            $hasCredit = !$isPending && !$needsOverride && (
+                                                $ed['overridden_by'] !== null
                                                 || (strtotime($ed['start_scan_time']) >= strtotime($ed['event_start']) - 10*60
                                                     && strtotime($ed['start_scan_time']) <= strtotime($ed['event_start']) + 5*60
-                                                    && strtotime($ed['end_scan_time']) >= strtotime($ed['event_end']));
+                                                    && strtotime($ed['end_scan_time']) >= strtotime($ed['event_end'])));
                                         ?>
-                                            <tr>
+                                            <tr <?= $isPending ? 'style="background:#fffbeb;"' : '' ?>>
                                                 <td><?= htmlspecialchars($ed['event_name']) ?></td>
                                                 <td><span class="type-badge"><?= htmlspecialchars($ed['event_type']) ?></span></td>
                                                 <td><?= date('M j, Y', strtotime($ed['event_start'])) ?></td>
-                                                <td><?= date('g:i A', strtotime($ed['start_scan_time'])) ?></td>
-                                                <td><?= date('g:i A', strtotime($ed['end_scan_time'])) ?></td>
-                                                <!-- <td><?= $ed['minutes_present'] !== null ? $ed['minutes_present'].' min' : '—' ?></td> -->
+                                                <td><?= $ed['start_scan_time'] ? date('g:i A', strtotime($ed['start_scan_time'])) : '—' ?></td>
                                                 <td>
-                                                    <!-- Status: Complete/Partial/Incomplete (consistent with student dashboard) -->
-                                                    <?php if ($ed['end_scan_time']): ?>
+                                                    <?php if ($isPending): ?>
+                                                        <span style="color:#d97706;font-weight:600;font-size:.8rem;">
+                                                            <i class="fas fa-clock"></i> No check-out
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <?= $ed['end_scan_time'] ? date('g:i A', strtotime($ed['end_scan_time'])) : '—' ?>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($isPending): ?>
+                                                        <span class="status-badge" style="background:#fff3cd;color:#92400e;border:1px dashed #d97706;">
+                                                            <i class="fas fa-exclamation-triangle"></i> Needs Confirmation
+                                                        </span>
+                                                    <?php elseif ($needsOverride): ?>
+                                                        <span class="status-badge" style="background:#fce7f3;color:#9d174d;border:1px dashed #db2777;">
+                                                            <i class="fas fa-user-clock"></i> Late – Override Needed
+                                                        </span>
+                                                    <?php elseif ($ed['end_scan_time']): ?>
                                                         <span class="status-badge complete"><i class="fas fa-check"></i> Complete</span>
                                                     <?php elseif ($ed['start_scan_time']): ?>
                                                         <span class="status-badge partial"><i class="fas fa-clock"></i> Partial</span>
@@ -1001,7 +1089,15 @@ if ($doExport && !$dbError && $selectedCourse) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
-                                                    <?php if ($hasCredit): ?>
+                                                    <?php if ($isPending): ?>
+                                                        <span style="color:#d97706;font-weight:600;">
+                                                            <i class="fas fa-question-circle"></i> Override to confirm
+                                                        </span>
+                                                    <?php elseif ($needsOverride): ?>
+                                                        <span style="color:#9d174d;font-weight:600;">
+                                                            <i class="fas fa-times-circle"></i> No – Override to grant
+                                                        </span>
+                                                    <?php elseif ($hasCredit): ?>
                                                         <span class="credit-yes"><i class="fas fa-check-circle"></i> Yes</span>
                                                     <?php else: ?>
                                                         <span class="credit-no"><i class="fas fa-times-circle"></i> No</span>

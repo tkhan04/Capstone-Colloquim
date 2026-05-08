@@ -240,30 +240,97 @@ $attendanceRate = $totalRequired > 0
                             <th>Date</th>
                             <th>Sign In</th>
                             <th>Sign Out</th>
+                            <th>Duration</th>
                             <th>Status</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($attendanceHistory as $rec): ?>
+                        <?php foreach ($attendanceHistory as $rec):
+                            // ── Timestamps ───────────────────────────────────────────────────
+                            $now_ts          = time();
+                            $eventStartTs    = strtotime($rec['start_time']);
+                            $eventEndTs      = strtotime($rec['end_time']);
+                            $fullCreditCutoff = $eventStartTs + 5 * 60;   // event_start + 5 min
+                            $incompleteAfter  = $eventEndTs  + 10 * 60;   // event_end   + 10 min
+
+                            $checkinTs  = $rec['start_scan_time'] ? strtotime($rec['start_scan_time']) : null;
+                            $checkoutTs = $rec['end_scan_time']   ? strtotime($rec['end_scan_time'])   : null;
+
+                            // ── Duration ─────────────────────────────────────────────────────
+                            if ($checkinTs && $checkoutTs) {
+                                $durationMins = max(0, (int)round(($checkoutTs - $checkinTs) / 60));
+                                $durationStr  = $durationMins >= 60
+                                    ? floor($durationMins / 60) . 'h ' . ($durationMins % 60) . 'm'
+                                    : $durationMins . ' min';
+                            } else {
+                                $durationStr = '—';
+                            }
+
+                            // ── Scan time display helpers ─────────────────────────────────────
+                            // Include the date when the scan falls on a different day than the
+                            // event (e.g. multi-day hackathons), so "10:27 AM → 10:27 AM = 24h"
+                            // doesn't look wrong.
+                            $eventDay   = date('Ymd', $eventStartTs);
+                            $checkinStr  = $checkinTs
+                                ? (date('Ymd', $checkinTs)  !== $eventDay
+                                    ? date('M j, g:i A', $checkinTs)
+                                    : date('g:i A', $checkinTs))
+                                : '—';
+                            $checkoutStr = $checkoutTs
+                                ? (date('Ymd', $checkoutTs) !== $eventDay
+                                    ? date('M j, g:i A', $checkoutTs)
+                                    : date('g:i A', $checkoutTs))
+                                : '—';
+
+                            // ── Status & credit type ─────────────────────────────────────────
+                            // Full credit:    checked in on time (≤ event_start+5min) AND
+                            //                checked out at or after event end
+                            // Partial credit: checked out but missed either timing rule
+                            // Incomplete:     never checked out AND event ended 10+ min ago
+                            // In Progress:    never checked out AND event still active
+                            if ($checkoutTs) {
+                                $onTimeIn  = $checkinTs !== null && $checkinTs <= $fullCreditCutoff;
+                                $onTimeOut = $checkoutTs >= $eventEndTs;
+                                if ($onTimeIn && $onTimeOut) {
+                                    $statusBadge = 'complete';
+                                    $statusLabel = 'Full Credit';
+                                    $statusIcon  = 'fa-check';
+                                } else {
+                                    $statusBadge = 'partial';
+                                    $statusLabel = 'Partial Credit';
+                                    $statusIcon  = 'fa-clock';
+                                }
+                            } elseif ($checkinTs) {
+                                if ($now_ts > $incompleteAfter) {
+                                    $statusBadge = 'incomplete';
+                                    $statusLabel = 'Incomplete';
+                                    $statusIcon  = 'fa-times';
+                                } else {
+                                    $statusBadge = 'partial';
+                                    $statusLabel = 'In Progress';
+                                    $statusIcon  = 'fa-spinner';
+                                }
+                            } else {
+                                $statusBadge = 'incomplete';
+                                $statusLabel = 'Incomplete';
+                                $statusIcon  = 'fa-times';
+                            }
+                        ?>
                         <tr>
                             <td><?= htmlspecialchars($rec['event_name']) ?></td>
                             <td><span class="type-badge"><?= htmlspecialchars($rec['event_type']) ?></span></td>
-                            <td><?= date('M j, Y', strtotime($rec['start_time'])) ?></td>
-                            <td><?= $rec['start_scan_time'] ? date('g:i A', strtotime($rec['start_scan_time'])) : '—' ?></td>
-                            <td><?= $rec['end_scan_time']   ? date('g:i A', strtotime($rec['end_scan_time']))   : '—' ?></td>
+                            <td><?= date('M j, Y', $eventStartTs) ?></td>
+                            <td><?= $checkinStr  ?></td>
+                            <td><?= $checkoutStr ?></td>
+                            <td><?= $durationStr ?></td>
                             <td>
-                                <?php if ($rec['end_scan_time']): ?>
-                                <span class="status-badge complete"><i class="fas fa-check"></i> Complete</span>
-                                <?php elseif ($rec['start_scan_time']): ?>
-                                <span class="status-badge partial"><i class="fas fa-clock"></i> Partial</span>
-                                <?php else: ?>
-                                <span class="status-badge incomplete"><i class="fas fa-times"></i> Incomplete</span>
-                                <?php endif; ?>
-
+                                <span class="status-badge <?= $statusBadge ?>">
+                                    <i class="fas <?= $statusIcon ?>"></i> <?= $statusLabel ?>
+                                </span>
                                 <?php if ($rec['audit_note']): ?>
-                                <span title="Override note: <?= htmlspecialchars($rec['audit_note']) ?>"
+                                <span title="Note: <?= htmlspecialchars($rec['audit_note']) ?>"
                                       style="color:#888;font-size:.8rem;margin-left:.25rem;">
-                                    <i class="fas fa-pen"></i>
+                                    <i class="fas fa-info-circle"></i>
                                 </span>
                                 <?php endif; ?>
                             </td>

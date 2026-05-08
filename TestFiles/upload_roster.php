@@ -149,7 +149,7 @@ function parseCsvRoster(string $tmpPath): array
 
 // ── ACCOUNT + ENROLLMENT CREATOR ─────────────────────────────────────────────
 
-function createStudentAccounts(PDO $pdo, string $courseId, array $rows, string $defaultPassword): array
+function createStudentAccounts(PDO $pdo, string $courseId, string $section, array $rows, string $defaultPassword): array
 {
     $created   = 0;
     $enrolled  = 0;
@@ -197,7 +197,7 @@ function createStudentAccounts(PDO $pdo, string $courseId, array $rows, string $
                 )->execute([$fname, $lname, $studentId]);
             }
 
-            // 3. Enrol in course (skip if already enrolled)
+            // 3. Enrol in course (skip if already enrolled — course_id is now unique per section)
             $alreadyEnrolled = $pdo->prepare(
                 "SELECT enrollment_id
                  FROM EnrollmentInCourses
@@ -210,9 +210,9 @@ function createStudentAccounts(PDO $pdo, string $courseId, array $rows, string $
                 $alreadyIn++;
             } else {
                 $pdo->prepare(
-                    "INSERT INTO EnrollmentInCourses (student_id, course_id, status)
-                     VALUES (?, ?, 'active')"
-                )->execute([$studentId, $courseId]);
+                    "INSERT INTO EnrollmentInCourses (student_id, course_id, section, status)
+                     VALUES (?, ?, ?, 'active')"
+                )->execute([$studentId, $courseId, $section]);
                 $enrolled++;
             }
 
